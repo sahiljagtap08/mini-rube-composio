@@ -33,5 +33,5 @@ export async function connectAllAccounts(userId: string) {
  * Get all connected accounts for a user.
  */
 export async function getConnectedAccounts(userId: string) {
-  return composio.connectedAccounts.list({ userId });
+  return composio.connectedAccounts.list({ userIds: [userId] });
 }

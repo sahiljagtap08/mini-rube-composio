@@ -19,7 +19,9 @@ export default function App() {
   }, [messages]);
 
   useEffect(() => {
-    fetch("/api/tool").then((r) => r.json()).then((d) => setActiveTool(d.slug));
+    fetch("/api/tool")
+      .then((r) => r.json() as Promise<{ slug: string }>)
+      .then((d) => setActiveTool(d.slug));
   }, []);
 
   async function openPicker() {
@@ -27,7 +29,7 @@ export default function App() {
     setSearch("");
     if (allTools.length === 0) {
       const res = await fetch("/api/tools");
-      const data = await res.json();
+      const data = (await res.json()) as { tools?: ToolEntry[] };
       setAllTools(data.tools || []);
     }
   }
@@ -40,18 +42,17 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slug }),
     });
-    const data = await res.json();
-    setActiveTool(data.error ? "error" : data.slug);
+    const data = (await res.json()) as { error?: string; slug?: string };
+    setActiveTool(data.error ? "error" : data.slug ?? "unknown");
   }
 
   async function connect(toolkit: string) {
     const res = await fetch(`/api/connect/${toolkit}`, { method: "POST" });
-    const data = await res.json();
+    const data = (await res.json()) as { redirectUrl?: string };
     if (data.redirectUrl) {
       window.open(data.redirectUrl, "_blank", "width=600,height=700");
-      // wait for OAuth to complete server-side
       const waitRes = await fetch(`/api/connect/${toolkit}/wait`, { method: "POST" });
-      const waitData = await waitRes.json();
+      const waitData = (await waitRes.json()) as { connected?: boolean };
       if (waitData.connected) {
         setConnections((c) => ({ ...c, [toolkit]: true }));
       }
@@ -117,7 +118,7 @@ export default function App() {
             <div className="tool-picker-header">
               <input
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => setSearch((e.target as HTMLInputElement).value)}
                 placeholder="Search tools..."
                 autoFocus
               />

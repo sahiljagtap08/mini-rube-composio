@@ -1,51 +1,127 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, tool, jsonSchema, type CoreMessage } from "ai";
-import { AUTH_CONFIGS } from "./lib/composio";
+import { AUTH_CONFIGS, composio } from "./lib/composio";
 import { connectAccount } from "./lib/auth";
-import { getTool, executeTool, listToolSlugs } from "./lib/tools";
+import { executeTool } from "./lib/tools";
+import {
+  getCatalog,
+  getToolBySlug,
+  getToolsBySlugs,
+  type ToolMeta,
+} from "./lib/catalog";
+import { route, type RouteDecision } from "./lib/router";
 
 const USER_ID = "candidate";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
-if (!OPENROUTER_API_KEY) {
-  throw new Error("OPENROUTER_API_KEY is not set");
-}
+if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not set");
 
 const openrouter = createOpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: OPENROUTER_API_KEY,
 });
 
-// pending OAuth connections waiting for completion
-const pendingConnections = new Map<string, Awaited<ReturnType<typeof connectAccount>>>();
+const pendingConnections = new Map<
+  string,
+  Awaited<ReturnType<typeof connectAccount>>
+>();
 
-// the currently loaded tool — starts with just GOOGLESUPER_SEND_EMAIL.
-// your job is to build a router that picks the right tool(s) for each prompt.
-let activeComposioTool = await getTool("GOOGLESUPER_SEND_EMAIL");
-if (!activeComposioTool) {
-  throw new Error("Failed to load GOOGLESUPER_SEND_EMAIL tool");
-}
+// preload catalog so the first chat doesn't pay the discovery cost
+await getCatalog().catch((err) =>
+  console.error("[startup] catalog preload failed:", err?.message ?? err),
+);
 
-// convert a composio tool into an AI SDK tool
-function makeAITool(composioTool: NonNullable<typeof activeComposioTool>) {
-  const slug = composioTool.slug ?? composioTool.name;
+function makeAITool(meta: ToolMeta) {
   return {
-    [slug]: tool({
-      description: composioTool.description ?? slug,
-      parameters: jsonSchema(
-        composioTool.inputParameters ?? { type: "object", properties: {} }
-      ),
-      execute: async (args: Record<string, unknown>) => {
-        console.log(`[tool] ${slug}`, args);
+    [meta.slug]: tool({
+      description: meta.description || meta.slug,
+      parameters: jsonSchema(meta.inputSchema ?? { type: "object", properties: {} }),
+      execute: async (args) => {
+        console.log(`[tool:exec] ${meta.slug}`, JSON.stringify(args).slice(0, 300));
         try {
-          return await executeTool(slug, USER_ID, args);
+          return await executeTool(meta.slug, USER_ID, args as Record<string, unknown>);
         } catch (err: any) {
-          console.error(`[tool error] ${slug}:`, err.message, err.cause ?? "", JSON.stringify(err, null, 2));
-          return { error: err.message };
+          console.error(
+            `[tool:err] ${meta.slug}:`,
+            err?.message,
+            err?.cause ?? "",
+          );
+          return { error: err?.message ?? String(err) };
         }
       },
     }),
   };
+}
+
+async function getConnectedToolkits(userId: string): Promise<Set<string>> {
+  try {
+    const res: any = await composio.connectedAccounts.list({ userIds: [userId] });
+    const items: any[] = res?.items ?? res?.data ?? (Array.isArray(res) ? res : []);
+    const set = new Set<string>();
+    for (const a of items) {
+      const tk =
+        a?.toolkit?.slug ??
+        a?.toolkit?.name ??
+        a?.toolkit ??
+        a?.appName ??
+        a?.app_name;
+      if (tk) set.add(String(tk).toLowerCase());
+    }
+    return set;
+  } catch (err: any) {
+    console.warn("[connections] list failed:", err?.message ?? err);
+    return new Set();
+  }
+}
+
+function lastUserText(messages: CoreMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "user") continue;
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) {
+      const parts = m.content
+        .map((p: any) => (typeof p === "string" ? p : p?.text ?? ""))
+        .filter(Boolean);
+      return parts.join(" ");
+    }
+  }
+  return "";
+}
+
+// stream a fixed assistant message in the AI SDK Data Stream Protocol format.
+// useChat will render this as a normal assistant message.
+function dataStreamReply(text: string): Response {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(enc.encode(`0:${JSON.stringify(text)}\n`));
+      controller.enqueue(
+        enc.encode(
+          `d:${JSON.stringify({ finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+        ),
+      );
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "x-vercel-ai-data-stream": "v1",
+    },
+  });
+}
+
+function formatDecision(d: RouteDecision): string {
+  return [
+    `mode=${d.mode}`,
+    `tools=[${d.selectedToolSlugs.join(", ") || "(none)"}]`,
+    d.jobType ? `job=${d.jobType}` : null,
+    d.authToolkits?.length ? `missing=${d.authToolkits.join(",")}` : null,
+    `reason="${d.reason}"`,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 Bun.serve({
@@ -56,13 +132,16 @@ Bun.serve({
         const toolkit = req.params.toolkit;
         if (!AUTH_CONFIGS[toolkit]) {
           return Response.json(
-            { error: `Unknown toolkit: ${toolkit}. Available: ${Object.keys(AUTH_CONFIGS).join(", ")}` },
-            { status: 400 }
+            {
+              error: `Unknown toolkit: ${toolkit}. Available: ${Object.keys(
+                AUTH_CONFIGS,
+              ).join(", ")}`,
+            },
+            { status: 400 },
           );
         }
         try {
           const link = await connectAccount(USER_ID, toolkit);
-          // store connection request so we can wait on it
           pendingConnections.set(toolkit, link);
           return Response.json({ redirectUrl: link.redirectUrl, id: link.id });
         } catch (err: any) {
@@ -71,13 +150,15 @@ Bun.serve({
       },
     },
 
-    // wait for a pending connection to complete (called by client after OAuth redirect)
     "/api/connect/:toolkit/wait": {
       async POST(req) {
         const toolkit = req.params.toolkit;
         const link = pendingConnections.get(toolkit);
         if (!link) {
-          return Response.json({ error: "No pending connection for " + toolkit }, { status: 400 });
+          return Response.json(
+            { error: "No pending connection for " + toolkit },
+            { status: 400 },
+          );
         }
         try {
           await link.waitForConnection(60_000);
@@ -89,37 +170,42 @@ Bun.serve({
       },
     },
 
+    "/api/connections": {
+      async GET() {
+        const set = await getConnectedToolkits(USER_ID);
+        const status: Record<string, boolean> = {};
+        for (const tk of Object.keys(AUTH_CONFIGS)) status[tk] = set.has(tk);
+        return Response.json({ connected: status });
+      },
+    },
+
+    // ---- legacy endpoints kept so the existing UI doesn't 404. ----
+    // The chat path no longer reads from these; they will go away when the UI
+    // is reworked in a later phase.
     "/api/tool": {
       GET() {
-        return Response.json({ slug: activeComposioTool!.slug ?? activeComposioTool!.name });
+        return Response.json({ slug: "(router-driven)" });
       },
     },
-
     "/api/tool/set": {
-      async POST(req) {
-        const body = await req.json();
-        const slug = body.slug;
-        if (!slug) {
-          return Response.json({ error: "slug required" }, { status: 400 });
-        }
-        try {
-          const t = await getTool(slug);
-          if (!t) {
-            return Response.json({ error: `Tool "${slug}" not found` }, { status: 404 });
-          }
-          activeComposioTool = t;
-          return Response.json({ slug: t.slug ?? t.name });
-        } catch (err: any) {
-          return Response.json({ error: err.message }, { status: 500 });
-        }
+      async POST() {
+        return Response.json(
+          { error: "manual tool selection is deprecated; the router picks tools per-prompt" },
+          { status: 410 },
+        );
       },
     },
-
     "/api/tools": {
       async GET() {
         try {
-          const tools = await listToolSlugs();
-          return Response.json({ tools });
+          const cat = await getCatalog();
+          return Response.json({
+            tools: cat.map((t) => ({
+              slug: t.slug,
+              toolkit: t.toolkit,
+              description: t.description,
+            })),
+          });
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
         }
@@ -128,27 +214,78 @@ Bun.serve({
 
     "/api/chat": {
       async POST(req) {
-        const body = await req.json();
+        const body = (await req.json()) as { messages?: CoreMessage[] };
         const messages: CoreMessage[] = body.messages ?? [];
+        const prompt = lastUserText(messages);
 
-        const toolName = activeComposioTool!.slug ?? activeComposioTool!.name;
+        console.log(`\n[chat] prompt="${prompt.slice(0, 200)}"`);
+        const connected = await getConnectedToolkits(USER_ID);
+        console.log(`[chat] connected=${[...connected].join(",") || "(none)"}`);
+
+        let decision: RouteDecision;
+        try {
+          decision = await route(prompt, connected);
+        } catch (err: any) {
+          console.error("[chat] router error:", err?.message ?? err);
+          return dataStreamReply(
+            `Sorry — the router failed: ${err?.message ?? err}`,
+          );
+        }
+        console.log(`[chat] route ${formatDecision(decision)}`);
+
+        if (decision.mode === "clarify") {
+          return dataStreamReply(
+            decision.clarifyQuestion ??
+              "I need a bit more detail to act on that. Could you clarify?",
+          );
+        }
+
+        if (decision.mode === "auth_needed") {
+          const tks = decision.authToolkits ?? [];
+          return dataStreamReply(
+            `I need you to connect ${tks.join(" and ")} before I can run this. Use the connect button${
+              tks.length > 1 ? "s" : ""
+            } at the top of the page.`,
+          );
+        }
+
+        if (decision.mode === "long_job") {
+          // Phase 2 will execute. For now report the plan honestly.
+          return dataStreamReply(
+            `Detected a long-running workflow (${decision.jobType ?? "unknown"}).\nReason: ${
+              decision.reason
+            }\nSelected tools: ${
+              decision.selectedToolSlugs.join(", ") || "(none yet)"
+            }\n\nThe deterministic long-job executor will be wired in the next phase.`,
+          );
+        }
+
+        // interactive
+        const tools = await getToolsBySlugs(decision.selectedToolSlugs);
+        const toolMap: Record<string, any> = {};
+        for (const t of tools) Object.assign(toolMap, makeAITool(t));
+
+        const slugList = tools.map((t) => t.slug).join(", ") || "(none)";
+        const system = `You are a helpful general agent acting on behalf of the user.
+Available tools for this turn: ${slugList}.
+- Use tools when they help; otherwise just answer.
+- Validate inputs; if a required argument is missing, ask the user.
+- Be concise. Summarize results clearly.`;
 
         const result = streamText({
           model: openrouter("moonshotai/kimi-k2"),
-          system: `You are a helpful assistant. You have one tool available: ${toolName}. Use it to fulfill the user's request. Be concise.`,
+          system,
           messages,
-          tools: makeAITool(activeComposioTool!),
-          maxSteps: 10,
+          tools: toolMap,
+          maxSteps: 12,
         });
-
         return result.toDataStreamResponse();
       },
     },
   },
-  development: {
-    hmr: true,
-    console: true,
-  },
+  development: { hmr: true, console: true },
 });
 
 console.log("Server running at http://localhost:3001");
+// keep the helper referenced so tree-shaking / unused-import lint stays quiet
+void getToolBySlug;
