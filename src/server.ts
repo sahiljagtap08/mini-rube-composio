@@ -501,10 +501,10 @@ Do NOT call any tool. Do NOT show the raw JSON. Do NOT list more than ${triage.t
               .join("\n")}`
           : "";
 
+        // email_triage already handled and early-returned above; this slot is
+        // only needed for the send_email branch now.
         const emailSlots =
-          decision.intent === "email_triage" || decision.intent === "send_email"
-            ? extractEmailSlots(prompt)
-            : null;
+          decision.intent === "send_email" ? extractEmailSlots(prompt) : null;
         const eventSlots =
           decision.intent === "calendar_schedule" ? extractEventSlots(prompt) : null;
 
@@ -518,19 +518,6 @@ Briefly introduce yourself and what you can do (3-5 short sentences):
 - Schedule calendar events — create events, resolving partial names via Google Contacts.
 - GitHub → Sheet — dump issues from a repo into a Google Sheet.
 - Drive → Sheet — extract structured info (e.g. resumes) from a Drive folder into a Sheet.`;
-            case "email_triage": {
-              const s = emailSlots!;
-              const q = s.gmailQuery ? `query="${s.gmailQuery}"` : "(no query filter — recency only)";
-              return `\n\nIntent: email_triage (READ ONLY). Extracted slots: count=${s.count}, importantOnly=${s.importantOnly}, starredOnly=${s.starredOnly}, unreadOnly=${s.unreadOnly}.
-
-ACT — do NOT ask the user to confirm. Safe defaults apply:
-1. Call the Gmail FETCH/LIST/SEARCH tool ONCE with max_results=${s.count} (the tool supports up to 500; never claim "I can only fetch 100"). Use ${q}. If the user asked for "important" and the tool also exposes label_ids, you can pass ["IMPORTANT"] or ["STARRED"] in addition to / instead of the query.
-2. From the response, take the first ${s.count} results (the tool may return them unsorted by recency — sort by internalDate descending).
-3. Present them as a tight bulleted list: sender · subject · one-line snippet/reason. If the user asked for "important ones", explain ranking briefly (IMPORTANT/STARRED label, real sender > bulk sender, recency).
-4. Offer to fetch full bodies for specific ones only if useful.
-
-You may NOT call ADD_LABEL, SEND, DELETE, ARCHIVE, TRASH, MODIFY, BATCH_*, DRAFT, REPLY, FORWARD or any mutating tool. "Important" means rank-by-label, NOT apply-label.`;
-            }
             case "send_email": {
               const s = emailSlots;
               const note = s?.gmailQuery
