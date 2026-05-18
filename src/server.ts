@@ -439,22 +439,29 @@ Bun.serve({
               ? `No emails were returned (fetched=0). Acknowledge to the user and suggest checking the Gmail connection or label filters.`
               : `I already fetched ${triage.stats.fetched} recent email${triage.stats.fetched === 1 ? "" : "s"} and ranked them. The top ${triage.topEmails.length} by importance are below.`;
 
-          const system = `You are mini-rube. Today is ${today}.
+          const system = `You are mini-rube. Today is ${today}. Your output is rendered as Markdown in the UI.
 
 ${intro}
+
+The ranked emails (top ${triage.topEmails.length} of ${triage.stats.fetched}) are below. Some fields may be missing — that's fine, just omit the missing piece entirely; do NOT print placeholder text, brackets, the literal word "missing", or markdown formatting around an empty value.
 
 \`\`\`json
 ${triagePayload}
 \`\`\`
 
-Write the user a clean, concise response:
-1. One short sentence acknowledging "I read N emails and surfaced the top M important ones."
-2. A numbered list of the ${triage.topEmails.length} emails, each item:
-   - **Sender** — Subject
-   - *date · one-line reason it looks important* (cite the label IMPORTANT/STARRED/UNREAD, or sender quality, or urgency keyword you noticed in subject/snippet)
-3. If labels and/or snippets are missing for some, just say so briefly — don't invent details.
+Write the answer EXACTLY in this shape (real Markdown — bold with **, italic with _, numbered list as "1." etc.):
 
-Do NOT call any tool. Do NOT show the raw JSON. Do NOT list more than ${triage.topEmails.length} items. Be tight and useful.`;
+1. **<sender or sender's name>** — <subject>
+   Reason: <one short clause naming the label (IMPORTANT/STARRED/UNREAD) and/or urgency keyword and/or sender quality>
+   <If labels list is non-empty, render one line: Labels: \`LABEL1\` · \`LABEL2\`>
+   <If a date value exists in the JSON for that email, render one line: _<date>_>
+
+Rules:
+- ${triage.topEmails.length} items, no more, no less. Number them 1 through ${triage.topEmails.length}.
+- One blank line between items.
+- NEVER write literal "*date*" or "_date_" or "[date]" or any other placeholder. If date is missing, omit the date line entirely.
+- NEVER write literal "*sender*", "[subject]", "(missing)" etc. Omit the entire bullet/line if you have nothing real to say.
+- Do NOT call any tool. Do NOT print the JSON. Do NOT add a preamble before the list other than ONE short sentence acknowledging you read ${triage.stats.fetched} emails and surfaced ${triage.topEmails.length}.`;
 
           const result = streamText({
             model,

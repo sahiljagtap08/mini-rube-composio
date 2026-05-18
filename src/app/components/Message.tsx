@@ -1,4 +1,5 @@
 import type { Message as ChatMessage } from "ai";
+import ReactMarkdown from "react-markdown";
 import type { RouteMeta, TriageStats } from "../types";
 import { RunPanel } from "./RunPanel";
 
@@ -35,7 +36,17 @@ export function Message({ message, meta, triage, isStreaming }: Props) {
           isStreaming={!!isStreaming}
         />
         {hasContent ? (
-          <div className="msg-content">{message.content}</div>
+          <div className="msg-content msg-markdown">
+            <ReactMarkdown
+              components={{
+                a: ({ node, ...rest }) => (
+                  <a {...rest} target="_blank" rel="noopener noreferrer" />
+                ),
+              }}
+            >
+              {message.content}
+            </ReactMarkdown>
+          </div>
         ) : (
           isStreaming && !hasActivity && (
             <div className="msg-thinking" aria-label="Thinking">
