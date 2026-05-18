@@ -88,8 +88,12 @@ For each user prompt, return:
 ${PROFILE_DESCRIPTIONS}
 
 - mode:
-  - "interactive" — small, one-shot work via the tool-using LLM loop (send 1 email, schedule 1 event, read recent K messages, summarize a handful of issues/files). conversational intents are ALWAYS interactive with empty tool_slugs.
-  - "long_job" — STRICT: pick this ONLY if the prompt asks to write output into a Google Sheet/Spreadsheet (look for "sheet", "spreadsheet", "csv", "table") OR processes 50+ items with "all"/"every". Summarizing 5 or 20 things in chat is NOT long_job — it's interactive.
+  - "interactive" — DEFAULT. Small, one-shot work via the tool-using LLM loop (send 1 email, schedule 1 event, read recent K messages, summarize a handful of issues/files). conversational intents are ALWAYS interactive with empty tool_slugs.
+  - "long_job" — ONLY when BOTH conditions hold:
+      (a) the prompt explicitly mentions writing output to a Google Sheet / Spreadsheet (literal word "sheet" or "spreadsheet"), AND
+      (b) the prompt asks for "all"/"every" items or describes bulk extraction.
+      Examples of long_job: "all issues in repo X into a google sheet", "every resume in this drive folder into a spreadsheet".
+      Examples that are NOT long_job (use interactive): "summarize the last 5 issues", "list 20 emails", "show me all my labels". Even "read all my emails" without a sheet output is interactive.
   - "clarify" — request is ambiguous or missing required input (no repo, no folder URL, no recipient for "send an email"). Greetings and capability questions are NOT clarify — they are conversational + interactive with no tools.
 
 - tool_slugs: the MINIMUM set of slugs from the shortlist that will be needed. Slugs MUST appear in the shortlist exactly. For conversational intent, return [].
