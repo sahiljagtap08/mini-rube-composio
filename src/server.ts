@@ -431,6 +431,13 @@ Bun.serve({
               .join("\n")}`
           : "";
 
+        const emailSlots =
+          decision.intent === "email_triage" || decision.intent === "send_email"
+            ? extractEmailSlots(prompt)
+            : null;
+        const eventSlots =
+          decision.intent === "calendar_schedule" ? extractEventSlots(prompt) : null;
+
         const intentBlock = (() => {
           switch (decision.intent) {
             case "conversational":
@@ -441,25 +448,45 @@ Briefly introduce yourself and what you can do (3-5 short sentences):
 - Schedule calendar events — create events, resolving partial names via Google Contacts.
 - GitHub → Sheet — dump issues from a repo into a Google Sheet.
 - Drive → Sheet — extract structured info (e.g. resumes) from a Drive folder into a Sheet.`;
-            case "email_triage":
-              return `\n\nIntent: email_triage (READ ONLY). You may ONLY call list/search/get Gmail tools. NEVER call ADD_LABEL, SEND, DELETE, ARCHIVE, TRASH, MODIFY, DRAFT or any mutating tool — even if "important" appears in the prompt; that means RANK by Gmail's IMPORTANT label, not apply it.
-Steps:
-1. Call the Gmail list/search tool once with maxResults equal to the user's N (or 100 if they said "last 100"). Get metadata + snippets only.
-2. Rank in-memory by labelIds (IMPORTANT, STARRED), sender (real person > bulk/no-reply), and snippet keywords.
-3. Present the top ~10 with sender, subject, and a one-line reason. Optionally offer to fetch full bodies for specific ones.
-Do not fetch full bodies for every email.`;
-            case "send_email":
-              return `\n\nIntent: send_email. Use the Gmail send tool.
-- Confirm you have: recipient(s), subject, body. If any is missing, ASK the user.
-- If attachments are listed above, include them via the tool's attachment parameter (use the local 'path').
-- Send only after the user-provided info is complete.`;
-            case "calendar_schedule":
-              return `\n\nIntent: calendar_schedule.
-Steps:
-1. If the user named a person by partial name, FIRST call the Contacts/People search tool with that name.
-2. If you get exactly one confident match, use their email as the attendee. If 0 or many, ASK the user to confirm the email — never invent one.
-3. Resolve dates ("tomorrow" → ${todayISO} + 1 day) in timezone ${tz}. Default duration 30 min.
-4. Call the calendar create-event tool.`;
+            case "email_triage": {
+              const s = emailSlots!;
+              const q = s.gmailQuery ? `query="${s.gmailQuery}"` : "(no query filter — recency only)";
+              return `\n\nIntent: email_triage (READ ONLY). Extracted slots: count=${s.count}, importantOnly=${s.importantOnly}, starredOnly=${s.starredOnly}, unreadOnly=${s.unreadOnly}.
+
+ACT — do NOT ask the user to confirm. Safe defaults apply:
+1. Call the Gmail FETCH/LIST/SEARCH tool ONCE with max_results=${s.count} (the tool supports up to 500; never claim "I can only fetch 100"). Use ${q}. If the user asked for "important" and the tool also exposes label_ids, you can pass ["IMPORTANT"] or ["STARRED"] in addition to / instead of the query.
+2. From the response, take the first ${s.count} results (the tool may return them unsorted by recency — sort by internalDate descending).
+3. Present them as a tight bulleted list: sender · subject · one-line snippet/reason. If the user asked for "important ones", explain ranking briefly (IMPORTANT/STARRED label, real sender > bulk sender, recency).
+4. Offer to fetch full bodies for specific ones only if useful.
+
+You may NOT call ADD_LABEL, SEND, DELETE, ARCHIVE, TRASH, MODIFY, BATCH_*, DRAFT, REPLY, FORWARD or any mutating tool. "Important" means rank-by-label, NOT apply-label.`;
+            }
+            case "send_email": {
+              const s = emailSlots;
+              const note = s?.gmailQuery
+                ? `\nNote: prompt mentioned filters (${s.gmailQuery}) — those belong to read flows, ignore here.`
+                : "";
+              return `\n\nIntent: send_email. Use the Gmail SEND tool (look for SEND_EMAIL / GMAIL_SEND_EMAIL).
+- You need: recipient(s), subject, body. ASK the user for whichever is missing — do NOT invent a recipient.
+- If attachments are listed above, include them via the tool's attachment parameter using the local 'path'.
+- Do not pick a DRAFT-only tool when the user asked to SEND. If only a DRAFT tool is available, create the draft and tell the user clearly that it's a draft, not a sent email.${note}`;
+            }
+            case "calendar_schedule": {
+              const s = eventSlots!;
+              const attendeeNote = s.attendees.length
+                ? `Attendee name(s) from prompt: ${s.attendees.join(", ")}. Search Contacts/People FIRST.`
+                : "No attendee specified — that's fine, single-person event is OK.";
+              const timeNote = s.time
+                ? `Time hint from prompt: ${s.time}.`
+                : `Time not specified — ASK the user for a time (date alone is not enough to create the event).`;
+              return `\n\nIntent: calendar_schedule. Extracted slots: date=${s.date ?? "?"}, time=${s.time ?? "?"}, duration=${s.durationMinutes}min, attendees=[${s.attendees.join(", ")}].
+
+ACT on safe defaults — do not over-clarify:
+1. ${attendeeNote} For each name: call the contacts SEARCH/GET tool. Exactly one confident match → use that email. Zero or many → ASK the user to confirm.
+2. Resolve relative dates against today (${todayISO}, tz ${tz}). "tomorrow" = ${todayISO} + 1 day. Default duration is ${s.durationMinutes} minutes.
+3. ${timeNote}
+4. Call the calendar CREATE_EVENT tool. Title the event clearly (include "mini-rube" for test events).`;
+            }
             case "github_issues_to_sheet":
             case "drive_files_to_sheet":
               return `\n\nIntent: ${decision.intent}. (Long-job executor still being wired — Phase 3.)`;
