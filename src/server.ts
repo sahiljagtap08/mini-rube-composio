@@ -18,7 +18,7 @@ import {
   INTENT_PROFILES,
   type Intent,
 } from "./lib/intent";
-import { extractEmailSlots, extractEventSlots } from "./lib/slots";
+import { extractEmailSlots, extractEventSlots, extractGitHubSlots } from "./lib/slots";
 
 const USER_ID = "candidate";
 
@@ -489,6 +489,23 @@ ACT on safe defaults — do not over-clarify:
 2. Resolve relative dates against today (${todayISO}, tz ${tz}). "tomorrow" = ${todayISO} + 1 day. Default duration is ${s.durationMinutes} minutes.
 3. ${timeNote}
 4. Call the calendar CREATE_EVENT tool. Title the event clearly (include "mini-rube" for test events).`;
+            }
+            case "github_read": {
+              const s = extractGitHubSlots(prompt);
+              const repoLine =
+                s.owner && s.repo
+                  ? `Repo: ${s.owner}/${s.repo}.`
+                  : `No owner/repo detected in prompt — ASK the user for "owner/repo".`;
+              const countLine = s.count
+                ? `User asked for ${s.count} items — pass as per_page (cap at 100; if user asks for more, paginate).`
+                : `No count specified — default to 10.`;
+              return `\n\nIntent: github_read (READ ONLY, github toolkit). Extracted slots: owner=${s.owner ?? "?"}, repo=${s.repo ?? "?"}, state=${s.state}, count=${s.count ?? "10"}, wantsSheet=${s.wantsSheet}.
+
+ACT — do NOT ask the user to confirm read-only operations.
+1. ${repoLine}
+2. ${countLine} state="${s.state}".
+3. Use GITHUB_LIST_REPOSITORY_ISSUES (preferred for "issues in a repo") with arguments like { owner, repo, state: "${s.state}", per_page: ${s.count ?? 10} }. Or GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS if a free-text search is needed.
+4. Present results as a compact list: #number · title · state · author · (one-line snippet of body if available). Do NOT call any CREATE/UPDATE/DELETE/CLOSE/LOCK/ADD_LABEL/SET tool — this turn is read-only.`;
             }
             case "github_issues_to_sheet":
             case "drive_files_to_sheet":

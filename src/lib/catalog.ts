@@ -264,6 +264,53 @@ const EMAIL_READ_DENY =
 const EMAIL_NOUNS_RX = /(EMAIL|MESSAGE|THREAD|GMAIL|INBOX|MAIL)/;
 const READ_VERBS_RX = /(FETCH|SEARCH|LIST|\bGET\b|READ|VIEW)/;
 
+const GH_READ_DENY =
+  /(?:^|_)(?:CREATE|UPDATE|DELETE|CLOSE|LOCK|UNLOCK|MERGE|FORK|ENABLE|DISABLE|ADD|REMOVE|SET|STAR|UNSTAR|WATCH|UNWATCH|PATCH|DISPATCH|TRANSFER|RENAME|UPLOAD|ARCHIVE|SUBMIT|APPROVE|MUTE|BLOCK|UNBLOCK|REPLACE|MOVE|BATCH|MARK|RESTORE|REVOKE|HIDE|COPY|SUSPEND|UNSUSPEND)(?:_|$)/;
+
+export async function getBestGitHubIssueReadTools(): Promise<ToolMeta[]> {
+  const cat = await getCatalog();
+  const gh = cat.filter((t) => t.toolkit === "github");
+  type Scored = { t: ToolMeta; score: number };
+  const scored: Scored[] = [];
+  for (const t of gh) {
+    const up = t.slug.toUpperCase();
+    if (GH_READ_DENY.test(up)) continue;
+    if (!/ISSUE/.test(up)) continue; // focus on issue-shaped reads
+    let score = 0;
+    if (up === "GITHUB_LIST_REPOSITORY_ISSUES") score += 25;
+    if (/SEARCH_ISSUES/.test(up)) score += 18;
+    if (
+      /LIST.*ISSUE/.test(up) &&
+      !/COMMENT|DEPENDENC|EVENT|REACTION|TIMELINE|SUB|TYPE|LABEL/.test(up)
+    )
+      score += 10;
+    if (/\bGET_AN_ISSUE\b/.test(up) && !/COMMENT|EVENT/.test(up)) score += 5;
+    if (score > 0) scored.push({ t, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((x) => x.t);
+}
+
+export async function getBestContactsSearchTools(): Promise<ToolMeta[]> {
+  const cat = await getCatalog();
+  const gs = cat.filter((t) => t.toolkit === "googlesuper");
+  const out: ToolMeta[] = [];
+  // Priority: SEARCH_PEOPLE > GET_PEOPLE > GET_CONTACTS
+  const byPriority = (slug: string) => {
+    if (/SEARCH_PEOPLE/.test(slug)) return 30;
+    if (/GET_PEOPLE/.test(slug)) return 20;
+    if (/GET_CONTACTS/.test(slug)) return 15;
+    if (/PEOPLE|CONTACT|DIRECTORY/.test(slug)) return 5;
+    return 0;
+  };
+  const scored = gs
+    .map((t) => ({ t, s: byPriority(t.slug.toUpperCase()) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s);
+  for (const { t } of scored) out.push(t);
+  return out;
+}
+
 export async function getBestEmailReadTools(): Promise<ToolMeta[]> {
   const cat = await getCatalog();
   const gs = cat.filter((t) => t.toolkit === "googlesuper");

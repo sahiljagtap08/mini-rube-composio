@@ -1,11 +1,18 @@
 import { generateObject, jsonSchema } from "ai";
-import { getCatalog, shortlistTools, getBestEmailReadTools } from "./catalog";
+import {
+  getCatalog,
+  shortlistTools,
+  getBestEmailReadTools,
+  getBestGitHubIssueReadTools,
+  getBestContactsSearchTools,
+} from "./catalog";
 import { model } from "./ai";
 import {
   filterToolsByIntent,
   INTENT_PROFILES,
   type Intent,
 } from "./intent";
+import { extractEventSlots } from "./slots";
 
 export type RouteMode =
   | "interactive"
@@ -103,10 +110,12 @@ ${PROFILE_DESCRIPTIONS}
 - clarify_question: only when mode = "clarify".
 - required_toolkits: subset of {googlesuper, github}.
 
-CRITICAL — action verbs decide the intent, not keyword overlap:
-- "read/show/list/fetch/find/search/view/summarize/triage" + emails → email_triage (READ ONLY). NEVER pick ADD_LABEL, SEND, DELETE, ARCHIVE, TRASH for these prompts.
-- "send/compose/email to" → send_email.
-- "schedule/create/book/set up" + event/meeting/calendar → calendar_schedule. If the user names a person by partial name, also include a Contacts/People search tool so the agent can resolve their email.
+CRITICAL — action verbs and toolkit nouns decide the intent, not keyword overlap:
+- "read/show/list/fetch/find/search/view/summarize/triage" + EMAIL/INBOX/GMAIL/MESSAGE → email_triage (READ ONLY, googlesuper). NEVER pick ADD_LABEL, SEND, DELETE, ARCHIVE, TRASH for these prompts.
+- "send/compose/email to" → send_email (googlesuper).
+- "schedule/create/book/set up" + event/meeting/calendar → calendar_schedule (googlesuper). If the user names a person by partial name, also include a Contacts/People search tool so the agent can resolve their email.
+- "read/list/show/summarize/find" + repo/owner/repository/issue/PR/pull request/GitHub → github_read (READ ONLY, github toolkit). Examples: "summarize the last 5 open issues from owner/repo", "show closed issues in owner/repo", "list PRs in owner/repo". Pick GITHUB_LIST_REPOSITORY_ISSUES or GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS — never CREATE/UPDATE/DELETE/CLOSE/LOCK/ADD_LABEL/SET tools.
+- A prompt that mentions GitHub but ALSO asks to write the output into a Google Sheet/Spreadsheet → github_issues_to_sheet (long_job), not github_read.
 - "delete/remove/cancel/archive" → only when explicitly requested.
 - A prompt like "show me the important ones" means RANK by Gmail's IMPORTANT label, not apply the IMPORTANT label.
 
@@ -219,6 +228,7 @@ export async function route(
     "email_triage",
     "send_email",
     "calendar_schedule",
+    "github_read",
   ]);
   if (
     selected.length === 0 &&
@@ -238,8 +248,8 @@ export async function route(
     }
   }
 
-  // Stage 2 recovery: deterministic email-read backstop. This is what makes
-  // the "last 5 emails" path actually executable when the LLM is unhelpful.
+  // Stage 2 recovery: deterministic backstops by intent. These are what make
+  // each action path executable even when the LLM is unhelpful.
   if (selected.length === 0 && obj.intent === "email_triage") {
     const best = (await getBestEmailReadTools()).slice(0, 2);
     if (best.length > 0) {
@@ -247,6 +257,42 @@ export async function route(
       console.log(
         `[router] recovery stage-2: injecting deterministic email read tools [${selected.join(", ")}]`,
       );
+    }
+  }
+  if (obj.intent === "github_read") {
+    const hasIssueReadTool = selected.some((s) =>
+      /^GITHUB_(LIST|SEARCH|GET).*ISSUE/.test(s),
+    );
+    if (!hasIssueReadTool) {
+      const best = (await getBestGitHubIssueReadTools()).slice(0, 2);
+      if (best.length > 0) {
+        const seen = new Set(selected);
+        for (const t of best) if (!seen.has(t.slug)) selected.push(t.slug);
+        console.log(
+          `[router] recovery stage-2: injecting github issue-read tools [${best.map((t) => t.slug).join(", ")}]`,
+        );
+      }
+    }
+  }
+  if (obj.intent === "calendar_schedule") {
+    // If the prompt mentions an attendee by name and we have no '@email'
+    // already, ensure a contacts/people search tool is in the toolset so the
+    // agent can resolve the email before creating the event.
+    const ev = extractEventSlots(prompt);
+    const promptHasEmail = /@/.test(prompt);
+    if (ev.attendees.length && !promptHasEmail) {
+      const hasContactTool = selected.some((s) =>
+        /(SEARCH_PEOPLE|GET_PEOPLE|GET_CONTACTS)/.test(s),
+      );
+      if (!hasContactTool) {
+        const best = (await getBestContactsSearchTools()).slice(0, 1);
+        if (best.length > 0) {
+          selected = [best[0]!.slug, ...selected];
+          console.log(
+            `[router] recovery stage-2: injecting contacts search tool [${best[0]!.slug}] because attendees=[${ev.attendees.join(", ")}] and no email in prompt`,
+          );
+        }
+      }
     }
   }
 

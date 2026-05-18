@@ -42,6 +42,46 @@ export function extractEmailSlots(prompt: string): EmailSlots {
   return { count, importantOnly, unreadOnly, starredOnly, gmailQuery };
 }
 
+export type GitHubSlots = {
+  owner: string | null;
+  repo: string | null;
+  state: "open" | "closed" | "all";
+  count: number | null;
+  wantsSheet: boolean;
+};
+
+export function extractGitHubSlots(prompt: string): GitHubSlots {
+  // owner/repo: looks for a token like "composiohq/composio" anywhere in prompt.
+  // We require non-URL-junk chars and a leading word boundary to avoid grabbing
+  // things like "yes/no" out of context.
+  const repoRx = /\b([A-Za-z0-9][A-Za-z0-9_.-]{0,38})\s*\/\s*([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\b/;
+  const m = repoRx.exec(prompt);
+  const owner = m?.[1] ?? null;
+  const repo = m?.[2] ?? null;
+
+  const p = prompt.toLowerCase();
+  let state: "open" | "closed" | "all" = "open"; // safe default
+  const hasOpen = /\bopen\b/.test(p);
+  const hasClosed = /\bclosed\b/.test(p);
+  const hasAll =
+    /\b(open\s+and\s+closed|closed\s+and\s+open|all\s+(?:issues|prs|pull)|every\s+(?:issue|pr|pull))\b/.test(p);
+  if (hasAll) state = "all";
+  else if (hasClosed && !hasOpen) state = "closed";
+  else if (hasOpen && !hasClosed) state = "open";
+
+  let count: number | null = null;
+  const nm =
+    /(?:last|latest|first|top|recent|past|previous)\s+(\d{1,4})/i.exec(prompt) ??
+    /(\d{1,4})\s+(?:issues?|prs?|pull\s+requests?)/i.exec(prompt);
+  if (nm && nm[1]) {
+    const n = parseInt(nm[1], 10);
+    if (!Number.isNaN(n)) count = n;
+  }
+
+  const wantsSheet = /\b(sheet|spreadsheet|csv)\b/.test(p);
+  return { owner, repo, state, count, wantsSheet };
+}
+
 export type EventSlots = {
   durationMinutes: number; // default 30
   date: string | null; // "tomorrow", explicit date, etc — agent resolves

@@ -69,9 +69,42 @@ const CASES: Case[] = [
     expect: { intent: "send_email", mode: "interactive" },
   },
   {
-    name: "github issues read-only",
+    name: "github issues read-only (open)",
     prompt: "summarize the last 5 open issues from composiohq/composio",
-    expect: { mode: "interactive", noMutating: true },
+    expect: {
+      intent: "github_read",
+      mode: "interactive",
+      noMutating: true,
+      hasAny: [/^GITHUB_(LIST|SEARCH|GET)/],
+    },
+  },
+  {
+    name: "github issues read-only (closed)",
+    prompt: "show closed issues from composiohq/composio",
+    expect: {
+      intent: "github_read",
+      mode: "interactive",
+      noMutating: true,
+      hasAny: [/^GITHUB_(LIST|SEARCH|GET)/],
+    },
+  },
+  {
+    name: "calendar with name (no time) needs contacts tool",
+    prompt: "schedule a calendar event tomorrow with karan",
+    expect: {
+      intent: "calendar_schedule",
+      mode: "interactive",
+      hasAny: [/(SEARCH_PEOPLE|GET_PEOPLE|GET_CONTACTS)/],
+    },
+  },
+  {
+    name: "calendar with name + duration includes contacts tool",
+    prompt: "schedule a 30 minute calendar event tomorrow with karan",
+    expect: {
+      intent: "calendar_schedule",
+      mode: "interactive",
+      hasAny: [/(SEARCH_PEOPLE|GET_PEOPLE|GET_CONTACTS)/, /(CREATE_EVENT|INSERT_EVENT)/],
+    },
   },
   {
     name: "github issues → sheet (long job)",
