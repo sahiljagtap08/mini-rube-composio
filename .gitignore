@@ -1,0 +1,46 @@
+# dependencies
+node_modules/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# build output
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+
+# test / coverage
+coverage/
+.nyc_output/
+
+# local agent session traces (collected by upload.sh)
+agent-sessions/
+
+# editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.history/
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# misc caches
+.cache/
+.parcel-cache/
+.turbo/
+.eslintcache
