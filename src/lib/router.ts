@@ -1,14 +1,6 @@
-import { createOpenAI } from "@ai-sdk/openai";
 import { generateObject, jsonSchema } from "ai";
 import { getCatalog, shortlistTools } from "./catalog";
-
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not set");
-
-const openrouter = createOpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: OPENROUTER_API_KEY,
-});
+import { model } from "./ai";
 
 export type RouteMode =
   | "interactive"
@@ -111,7 +103,7 @@ export async function route(
   let obj: RouterModelOutput;
   try {
     const result = await generateObject({
-      model: openrouter("moonshotai/kimi-k2"),
+      model,
       schema: ROUTER_SCHEMA,
       mode: "json",
       system: SYSTEM,

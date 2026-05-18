@@ -1,5 +1,4 @@
-import { createOpenAI } from "@ai-sdk/openai";
-import { streamText, tool, jsonSchema, type CoreMessage } from "ai";
+import { streamText, tool, jsonSchema, StreamData, type CoreMessage } from "ai";
 import { AUTH_CONFIGS, composio } from "./lib/composio";
 import { connectAccount } from "./lib/auth";
 import { executeTool } from "./lib/tools";
@@ -11,15 +10,9 @@ import {
 } from "./lib/catalog";
 import { route, type RouteDecision } from "./lib/router";
 import { saveUpload, getUpload, type Upload } from "./lib/uploads";
+import { model, MODEL_ID, PROVIDER } from "./lib/ai";
 
 const USER_ID = "candidate";
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not set");
-
-const openrouter = createOpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: OPENROUTER_API_KEY,
-});
 
 const pendingConnections = new Map<
   string,
@@ -101,17 +94,20 @@ function lastUserText(messages: CoreMessage[]): string {
 }
 
 // stream a fixed assistant message in the AI SDK Data Stream Protocol format.
-// useChat will render this as a normal assistant message.
-function dataStreamReply(text: string): Response {
+// useChat will render the text part as a normal assistant message, and the
+// optional `meta` payload arrives in useChat().data so the frontend can log
+// it to the browser console.
+function dataStreamReply(text: string, meta?: unknown): Response {
   const enc = new TextEncoder();
+  const lines: string[] = [];
+  if (meta !== undefined) lines.push(`2:${JSON.stringify([meta])}\n`);
+  lines.push(`0:${JSON.stringify(text)}\n`);
+  lines.push(
+    `d:${JSON.stringify({ finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+  );
   const stream = new ReadableStream({
     start(controller) {
-      controller.enqueue(enc.encode(`0:${JSON.stringify(text)}\n`));
-      controller.enqueue(
-        enc.encode(
-          `d:${JSON.stringify({ finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
-        ),
-      );
+      for (const l of lines) controller.enqueue(enc.encode(l));
       controller.close();
     },
   });
@@ -278,17 +274,34 @@ Bun.serve({
         try {
           decision = await route(prompt, connected);
         } catch (err: any) {
-          console.error("[chat] router error:", err?.message ?? err);
-          return dataStreamReply(
-            `Sorry — the router failed: ${err?.message ?? err}`,
-          );
+          const msg = err?.message ?? String(err);
+          console.error("[chat] router error:", msg);
+          return dataStreamReply(`Sorry — the router failed: ${msg}`, {
+            kind: "error",
+            stage: "router",
+            error: msg,
+          });
         }
         console.log(`[chat] route ${formatDecision(decision)}`);
+
+        const routerMeta = {
+          kind: "route",
+          mode: decision.mode,
+          tools: decision.selectedToolSlugs,
+          reason: decision.reason,
+          jobType: decision.jobType,
+          authToolkits: decision.authToolkits ?? null,
+          requiredToolkits: decision.requiredToolkits,
+          connected: [...connected],
+          provider: PROVIDER,
+          model: MODEL_ID,
+        };
 
         if (decision.mode === "clarify") {
           return dataStreamReply(
             decision.clarifyQuestion ??
               "I need a bit more detail to act on that. Could you clarify?",
+            routerMeta,
           );
         }
 
@@ -298,6 +311,7 @@ Bun.serve({
             `I need you to connect ${tks.join(" and ")} before I can run this. Use the connect button${
               tks.length > 1 ? "s" : ""
             } at the top of the page.`,
+            routerMeta,
           );
         }
 
@@ -305,17 +319,18 @@ Bun.serve({
           return dataStreamReply(
             decision.errorMessage ??
               "Upstream LLM provider returned an error. Check server logs.",
+            { ...routerMeta, kind: "error", stage: "router", error: decision.errorMessage },
           );
         }
 
         if (decision.mode === "long_job") {
-          // Phase 2 will execute. For now report the plan honestly.
           return dataStreamReply(
             `Detected a long-running workflow (${decision.jobType ?? "unknown"}).\nReason: ${
               decision.reason
             }\nSelected tools: ${
               decision.selectedToolSlugs.join(", ") || "(none yet)"
             }\n\nThe deterministic long-job executor will be wired in the next phase.`,
+            routerMeta,
           );
         }
 
@@ -354,14 +369,30 @@ Task-specific guidance:
 - Scheduling a calendar event with a partial name (e.g. "with karan"): FIRST search Google Contacts / People for that name using the available contacts tool. If you find exactly one confident match, use their email as the attendee. If you find multiple candidates or none, ask the user to confirm the email. Never invent an email address. Default event length is 30 minutes if not specified.
 - Sending an email with an attachment: inspect the email-send tool's input schema for an 'attachment' / 'attachments' parameter. Pass the local file 'path' provided above (most Composio file tools accept a local path; if the schema requires base64 or a Drive file id, adapt accordingly and tell the user what you did).${attachmentBlock}`;
 
+        const sd = new StreamData();
+        sd.append(routerMeta as any);
+
         const result = streamText({
-          model: openrouter("moonshotai/kimi-k2"),
+          model,
           system,
           messages,
           tools: toolMap,
           maxSteps: 12,
+          onFinish({ finishReason, usage }) {
+            console.log(
+              `[chat] finish reason=${finishReason} usage=${JSON.stringify(usage)}`,
+            );
+            sd.append({ kind: "finish", finishReason, usage } as any);
+            sd.close();
+          },
+          onError({ error }) {
+            const msg = (error as any)?.message ?? String(error);
+            console.error("[streamText:error]", msg);
+            sd.append({ kind: "error", stage: "streamText", error: msg } as any);
+          },
         });
-        return result.toDataStreamResponse();
+
+        return result.toDataStreamResponse({ data: sd });
       },
     },
   },

@@ -9,14 +9,47 @@ export default function App() {
   const attachmentsRef = useRef<UploadInfo[]>([]);
   attachmentsRef.current = attachments;
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, error } =
+  const { messages, input, handleInputChange, handleSubmit, isLoading, error, data } =
     useChat({
       api: "/api/chat",
       experimental_prepareRequestBody: ({ messages }) => ({
         messages,
         data: { attachments: attachmentsRef.current.map((a) => ({ id: a.id })) },
       }),
+      onResponse(res) {
+        console.log(
+          `%c[chat] response ${res.status} ${res.statusText}`,
+          "color:#888",
+        );
+        if (!res.ok) {
+          res
+            .clone()
+            .text()
+            .then((t) => console.error("[chat] error body:", t))
+            .catch(() => {});
+        }
+      },
+      onError(err) {
+        console.error("[chat] error:", err);
+      },
+      onFinish(message, opts) {
+        console.log("[chat] finished:", { message, ...opts });
+      },
     });
+
+  const lastSeenDataIdx = useRef(0);
+  useEffect(() => {
+    if (!data) return;
+    for (let i = lastSeenDataIdx.current; i < data.length; i++) {
+      const part = data[i];
+      const kind = (part as any)?.kind;
+      if (kind === "error") console.error("[chat:meta]", part);
+      else if (kind === "route") console.log("%c[chat:route]", "color:#0a7", part);
+      else if (kind === "finish") console.log("%c[chat:finish]", "color:#888", part);
+      else console.log("[chat:meta]", part);
+    }
+    lastSeenDataIdx.current = data.length;
+  }, [data]);
 
   const [activeTool, setActiveTool] = useState("loading...");
   const [pickerOpen, setPickerOpen] = useState(false);
