@@ -5,7 +5,13 @@ import { describeTool, ServiceIcon, formatBytes, type Service } from "../utils/t
 import { CheckIcon, Spinner, XIcon } from "./icons";
 
 type StepState = "active" | "done" | "error";
-type Step = { service: Service; label: string; state: StepState; detail?: string };
+type Step = {
+  service: Service;
+  label: string;
+  state: StepState;
+  detail?: string;
+  retries?: number;
+};
 
 type Props = {
   meta?: RouteMeta;
@@ -66,20 +72,44 @@ function buildSteps(
     }
   }
 
+  // Consolidate consecutive calls to the same tool into a single step,
+  // tracking retries. (Model failing once then retrying shouldn't render two
+  // ugly rows.)
+  type Grouped = { ti: ToolInvocation; attempts: number };
+  const grouped: Grouped[] = [];
   for (const ti of invocations) {
+    const last = grouped[grouped.length - 1];
+    if (last && last.ti.toolName === ti.toolName) {
+      last.attempts += 1;
+      last.ti = ti; // keep newest state — that's the final outcome
+    } else {
+      grouped.push({ ti, attempts: 1 });
+    }
+  }
+
+  for (const g of grouped) {
+    const { ti } = g;
     const { service, label } = describeTool(ti.toolName);
     let state: StepState = "active";
     let detail: string | undefined;
     if (ti.state === "result") {
       const r: any = (ti as any).result;
-      if (r && typeof r === "object" && "error" in r) {
+      // Composio result shape: { successful, error, data }. Treat as failure
+      // only when there is an actual error value — `error: null` on success
+      // must NOT show up as "null" in the UI.
+      const errVal =
+        r && typeof r === "object"
+          ? (r as any).error ?? (r as any).message
+          : undefined;
+      const failed = r?.successful === false || (errVal != null && errVal !== "");
+      if (failed) {
         state = "error";
-        detail = String(r.error).slice(0, 160);
+        detail = errVal ? String(errVal).slice(0, 160) : "Failed";
       } else {
         state = "done";
       }
     }
-    steps.push({ service, label, state, detail });
+    steps.push({ service, label, state, retries: g.attempts - 1, detail });
   }
 
   if (isStreaming && steps.length > 0 && steps.every((s) => s.state === "done")) {
@@ -119,8 +149,15 @@ export function RunPanel({ meta, toolInvocations, triage, isStreaming }: Props) 
                 <ServiceIcon service={s.service} />
               </span>
               <span className="run-step-label">{s.label}</span>
+              {s.retries && s.retries > 0 ? (
+                <span className="run-step-retries">
+                  retried {s.retries}×
+                </span>
+              ) : null}
               <StateGlyph state={s.state} />
-              {s.detail && <span className="run-step-detail" title={s.detail}>{s.detail}</span>}
+              {s.state === "error" && s.detail ? (
+                <span className="run-step-detail" title={s.detail}>{s.detail}</span>
+              ) : null}
             </li>
           ))}
         </ul>

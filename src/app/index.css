@@ -213,8 +213,8 @@ code {
 }
 .suggestion {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: flex-start;
+  gap: 12px;
   padding: 14px 16px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -226,6 +226,22 @@ code {
   border-color: var(--border-strong);
   box-shadow: var(--shadow-md);
   transform: translateY(-1px);
+}
+.suggestion-icon {
+  flex: 0 0 22px;
+  height: 22px;
+  width: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 1px;
+}
+.suggestion-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 .suggestion-label {
   font-size: 14px;
@@ -427,6 +443,14 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.run-step-retries {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
 }
 .run-step-active .run-step-label { color: var(--text); }
 .run-step-done .run-step-label { color: var(--text-muted); font-weight: 500; }

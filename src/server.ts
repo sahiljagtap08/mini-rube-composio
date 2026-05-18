@@ -38,6 +38,7 @@ type TurnState = {
   blockedCount: Map<string, number>;
   fatalBlock: boolean;
   attachments: Upload[];
+  streamData?: StreamData;
 };
 
 // For SEND_EMAIL-style slugs, ensure each pending upload has been staged in
@@ -131,6 +132,16 @@ function makeAITool(meta: ToolMeta, intent: Intent, turn: TurnState) {
               error: msg,
               hint: "Consider whether arguments match the tool's input schema or whether the relevant toolkit is connected.",
             };
+          }
+          // Emit a frontend-visible "action success" signal for slugs whose
+          // success has a real lifecycle effect (e.g. clear attachments).
+          if (/SEND_EMAIL/.test(meta.slug.toUpperCase()) && turn.streamData) {
+            turn.streamData.append({
+              kind: "action_success",
+              action: "send_email",
+              slug: meta.slug,
+              clearAttachments: true,
+            } as any);
           }
           return result;
         } catch (err: any) {
@@ -558,10 +569,13 @@ Rules:
 
         // interactive
         const tools = await getToolsBySlugs(decision.selectedToolSlugs);
+        const sd = new StreamData();
+        sd.append(routerMeta as any);
         const turnState: TurnState = {
           blockedCount: new Map(),
           fatalBlock: false,
           attachments,
+          streamData: sd,
         };
         const toolMap: Record<string, any> = {};
         for (const t of tools)
@@ -683,9 +697,6 @@ Operating rules:
 - NEVER ask the user for internal implementation details: S3 keys, file paths, local paths, MIME types, file sizes, internal IDs, content type headers. If a tool needs these, the system has already given them to you in the system prompt's attachment/context blocks. Read those blocks.
 - Look at the FULL conversation history when answering follow-up messages. A bare email address, a date, or "just say hi" is a continuation of the prior task, not a new task.
 - Be concise. A few sentences plus a compact list when relevant.${intentBlock}${attachmentBlock}`;
-
-        const sd = new StreamData();
-        sd.append(routerMeta as any);
 
         const result = streamText({
           model,

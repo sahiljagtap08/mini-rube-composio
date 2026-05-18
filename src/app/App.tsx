@@ -95,6 +95,9 @@ export default function App() {
         console.log("%c[chat:route]", "color:#0a7;font-weight:600", part);
       } else if (kind === "triage") {
         console.log("%c[chat:triage]", "color:#0a7;font-weight:600", part);
+      } else if (kind === "action_success") {
+        console.log("%c[chat:action_success]", "color:#0a7;font-weight:600", part);
+        if (part.clearAttachments) setAttachments([]);
       } else if (kind === "finish") {
         console.log("%c[chat:finish]", "color:#888", part);
       } else {
