@@ -69,12 +69,14 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
       /\bREPLY\b/,
       /FORWARD/,
       /UPDATE/,
-      /MARK_AS/,
+      /MARK_/,
       /MOVE_/,
       /STAR_/,
       /UNSTAR_/,
+      /NOTIFICATIONS/,
     ],
     readonly: true,
+    toolkits: ["googlesuper"],
   },
   send_email: {
     description: "Compose and send one email (optionally with attachment).",
@@ -98,6 +100,7 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
       /MOVE_TO_TRASH/,
       /MARK_AS/,
     ],
+    toolkits: ["googlesuper"],
   },
   calendar_schedule: {
     description:
@@ -117,6 +120,7 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
       /\bGET\b/,
     ],
     deny: [/DELETE/, /CANCEL/, /REMOVE/, /CLEAR/],
+    toolkits: ["googlesuper"],
   },
   github_issues_to_sheet: {
     description:
@@ -210,6 +214,11 @@ export type ToolFilter = {
   blocked: Array<{ slug: string; reason: string }>;
 };
 
+function toolkitOfSlug(slug: string): string {
+  const i = slug.indexOf("_");
+  return (i > 0 ? slug.slice(0, i) : slug).toLowerCase();
+}
+
 export function filterToolsByIntent(intent: Intent, slugs: string[]): ToolFilter {
   const p = INTENT_PROFILES[intent];
   if (p.noTools) {
@@ -225,6 +234,13 @@ export function filterToolsByIntent(intent: Intent, slugs: string[]): ToolFilter
   const blocked: Array<{ slug: string; reason: string }> = [];
   for (const s of slugs) {
     const up = s.toUpperCase();
+    if (p.toolkits && !p.toolkits.includes(toolkitOfSlug(s))) {
+      blocked.push({
+        slug: s,
+        reason: `intent="${intent}" only allows toolkits [${p.toolkits.join(", ")}]`,
+      });
+      continue;
+    }
     const deniedBy = p.deny.find((rx) => rx.test(up));
     if (deniedBy) {
       blocked.push({
