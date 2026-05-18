@@ -559,6 +559,15 @@ code {
   flex-direction: column;
   gap: 6px;
 }
+.draft-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  align-self: flex-start;
+}
 .attachment-row {
   display: flex;
   flex-wrap: wrap;

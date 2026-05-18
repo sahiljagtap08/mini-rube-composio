@@ -13,6 +13,7 @@ type Props = {
   onUploadFile: (file: File) => void;
   onRemoveAttachment: (id: string) => void;
   isLoading: boolean;
+  draftHint?: string;
 };
 
 export function Composer({
@@ -24,6 +25,7 @@ export function Composer({
   onUploadFile,
   onRemoveAttachment,
   isLoading,
+  draftHint,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -37,6 +39,7 @@ export function Composer({
 
   return (
     <div className="composer-wrap">
+      {draftHint && <div className="draft-hint">{draftHint}</div>}
       <AttachmentChips attachments={attachments} onRemove={onRemoveAttachment} />
       <form ref={formRef} className="composer" onSubmit={onSubmit}>
         <input

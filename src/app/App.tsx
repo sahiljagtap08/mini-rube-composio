@@ -236,8 +236,32 @@ export default function App() {
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     handleSubmit(e);
-    setAttachments([]);
+    // Do NOT clear attachments here. Multi-turn email flows ("send an email
+    // with this PDF" → "to nikhil@…" → "just say hi") need the same
+    // attachment in scope across turns. We auto-clear only on SEND_EMAIL
+    // success (see the effect below) or when the user clicks the X.
   }
+
+  // Auto-clear attachments once an email actually goes out successfully.
+  useEffect(() => {
+    if (messages.length === 0 || attachments.length === 0) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role !== "assistant") continue;
+      const toolInvocations = (m as any).toolInvocations ?? [];
+      const sent = toolInvocations.some((ti: any) => {
+        if (!/SEND_EMAIL/i.test(ti.toolName ?? "")) return false;
+        if (ti.state !== "result") return false;
+        const r = ti.result;
+        return !!r && !(typeof r === "object" && "error" in r);
+      });
+      if (sent) {
+        setAttachments([]);
+        return;
+      }
+      break; // only inspect the latest assistant turn
+    }
+  }, [messages, attachments.length]);
 
   function onPickSuggestion(prompt: string) {
     append({ role: "user", content: prompt });
@@ -284,6 +308,11 @@ export default function App() {
           onUploadFile={onUploadFile}
           onRemoveAttachment={onRemoveAttachment}
           isLoading={isLoading}
+          draftHint={
+            attachments.length > 0 && messages.length > 0
+              ? `Drafting email with ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} — will be reused on follow-up messages`
+              : undefined
+          }
         />
       </main>
     </div>

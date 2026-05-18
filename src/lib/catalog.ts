@@ -291,6 +291,23 @@ export async function getBestGitHubIssueReadTools(): Promise<ToolMeta[]> {
   return scored.map((x) => x.t);
 }
 
+export async function getBestSendEmailTools(): Promise<ToolMeta[]> {
+  const cat = await getCatalog();
+  const gs = cat.filter((t) => t.toolkit === "googlesuper");
+  const score = (slug: string) => {
+    const up = slug.toUpperCase();
+    if (up === "GOOGLESUPER_SEND_EMAIL") return 30;
+    if (/SEND_EMAIL/.test(up)) return 20;
+    if (/CREATE_EMAIL_DRAFT/.test(up)) return 10; // last-resort draft tool
+    return 0;
+  };
+  return gs
+    .map((t) => ({ t, s: score(t.slug) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .map((x) => x.t);
+}
+
 export async function getBestContactsSearchTools(): Promise<ToolMeta[]> {
   const cat = await getCatalog();
   const gs = cat.filter((t) => t.toolkit === "googlesuper");

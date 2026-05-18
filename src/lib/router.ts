@@ -5,6 +5,7 @@ import {
   getBestEmailReadTools,
   getBestGitHubIssueReadTools,
   getBestContactsSearchTools,
+  getBestSendEmailTools,
 } from "./catalog";
 import { model } from "./ai";
 import {
@@ -121,6 +122,8 @@ CRITICAL — action verbs and toolkit nouns decide the intent, not keyword overl
 
 "yo", "hi", "hello", "thanks", "what can you do?", "help", "who are you?" → intent="conversational", mode="interactive", tool_slugs=[].
 
+FOLLOW-UPS — keep the prior task's intent: if the ACTIVE prompt is a short fragment (a bare email address, "just send him hi", "subject is foo", "yes go ahead", "make it 30 min") AND the recent conversation shows an in-progress task, classify as the SAME intent as that task. Don't reset to conversational/clarify for one-line follow-ups inside an ongoing flow.
+
 Never invent slugs. If a task is in scope but the request is missing critical inputs, return mode="clarify".`;
 
 function looksConversational(p: string): boolean {
@@ -134,9 +137,20 @@ function looksConversational(p: string): boolean {
   return false;
 }
 
+export type RouteContext = {
+  // Most recent user/assistant pairs (truncated). Lets the router classify
+  // short follow-ups ("nikhil@example.com", "just send him hi") as
+  // continuations of the prior task instead of fresh intents.
+  recentTurns?: string;
+  // Whether the user has uploaded files that are still in scope for the
+  // current task. Used by the router to prefer send_email when ambiguous.
+  hasAttachments?: boolean;
+};
+
 export async function route(
   prompt: string,
   connectedToolkits: Set<string>,
+  ctx: RouteContext = {},
 ): Promise<RouteDecision> {
   // Fast path for unambiguous chit-chat / capability questions. Skips the LLM
   // call entirely so we don't waste tokens or get a wrong intent.
@@ -152,13 +166,24 @@ export async function route(
     };
   }
 
-  const shortlist = await shortlistTools(prompt, 50);
+  // Build the shortlist from the active prompt PLUS recent conversation so
+  // follow-ups like "just send him hi" still surface SEND_EMAIL / contacts /
+  // calendar tools rather than only matching the active prompt's tokens.
+  const shortlistInput = ctx.recentTurns ? `${prompt}\n${ctx.recentTurns}` : prompt;
+  const shortlist = await shortlistTools(shortlistInput, 50);
 
   const compact = shortlist
     .map((t) => `- ${t.slug} [${t.toolkit}]: ${(t.description || "").slice(0, 140)}`)
     .join("\n");
 
-  const userMsg = `User prompt:\n"""${prompt}"""\n\nShortlist:\n${compact || "(no clearly-relevant tools matched)"}\n\nReturn JSON only.`;
+  const contextBlock = ctx.recentTurns
+    ? `Recent conversation (for context — the ACTIVE prompt is the last user turn):\n${ctx.recentTurns}\n\n`
+    : "";
+  const attachBlock = ctx.hasAttachments
+    ? `\n\nNOTE: the user has already uploaded files via the UI on a prior turn. They are STILL available for this turn. If the active prompt is a short follow-up to a send-email flow (e.g. a bare email address, "just send him hi", "subject is X"), classify it as send_email and continue the existing draft.`
+    : "";
+
+  const userMsg = `${contextBlock}Active user prompt:\n"""${prompt}"""${attachBlock}\n\nShortlist:\n${compact || "(no clearly-relevant tools matched)"}\n\nReturn JSON only.`;
 
   let obj: RouterModelOutput;
   try {
@@ -257,6 +282,18 @@ export async function route(
       console.log(
         `[router] recovery stage-2: injecting deterministic email read tools [${selected.join(", ")}]`,
       );
+    }
+  }
+  if (obj.intent === "send_email") {
+    const hasSend = selected.some((s) => /SEND_EMAIL/.test(s.toUpperCase()));
+    if (!hasSend) {
+      const best = (await getBestSendEmailTools()).slice(0, 1);
+      if (best.length > 0) {
+        selected = [best[0]!.slug, ...selected.filter((s) => s !== best[0]!.slug)];
+        console.log(
+          `[router] recovery stage-2: injecting send-email tool [${best[0]!.slug}]`,
+        );
+      }
     }
   }
   if (obj.intent === "github_read") {

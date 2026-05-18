@@ -9,7 +9,7 @@ import {
   type ToolMeta,
 } from "./lib/catalog";
 import { route, type RouteDecision } from "./lib/router";
-import { saveUpload, getUpload, type Upload } from "./lib/uploads";
+import { saveUpload, getUpload, ensureS3Key, type Upload } from "./lib/uploads";
 import { model, MODEL_ID, PROVIDER } from "./lib/ai";
 import {
   isReadOnlyIntent,
@@ -37,7 +37,35 @@ await getCatalog().catch((err) =>
 type TurnState = {
   blockedCount: Map<string, number>;
   fatalBlock: boolean;
+  attachments: Upload[];
 };
+
+// For SEND_EMAIL-style slugs, ensure each pending upload has been staged in
+// Composio's S3 and rewrite the `attachment` argument with the proper shape.
+async function maybeInjectAttachments(
+  slug: string,
+  args: Record<string, unknown>,
+  attachments: Upload[],
+  toolkitSlug: string,
+): Promise<Record<string, unknown>> {
+  if (attachments.length === 0) return args;
+  if (!/SEND_EMAIL/.test(slug.toUpperCase())) return args;
+  const out = { ...args };
+  const staged = await Promise.all(
+    attachments.map((u) => ensureS3Key(u, slug, toolkitSlug)),
+  );
+  // The user uploaded file(s) in this conversation — always inject them as
+  // the attachment for send-email-shaped tools. Whatever the model put in
+  // the `attachment` field is irrelevant; the model doesn't have valid
+  // s3keys anyway.
+  console.log(
+    `[tool:attach] auto-injecting ${staged.length} attachment(s) for ${slug}: ${staged
+      .map((s) => s.name)
+      .join(", ")}`,
+  );
+  out.attachment = staged.length === 1 ? staged[0] : staged;
+  return out;
+}
 
 function makeAITool(meta: ToolMeta, intent: Intent, turn: TurnState) {
   return {
@@ -74,7 +102,26 @@ function makeAITool(meta: ToolMeta, intent: Intent, turn: TurnState) {
         }
 
         try {
-          const safeArgs = clampToolArgs(meta.slug, args as Record<string, unknown>);
+          let safeArgs = clampToolArgs(meta.slug, args as Record<string, unknown>);
+          // Auto-resolve attachments → composio S3 for send-email-shaped tools.
+          if (turn.attachments.length > 0) {
+            try {
+              safeArgs = await maybeInjectAttachments(
+                meta.slug,
+                safeArgs,
+                turn.attachments,
+                meta.toolkit,
+              );
+            } catch (e: any) {
+              console.error(
+                `[tool:attach] failed to stage attachment for ${meta.slug}:`,
+                e?.message ?? e,
+              );
+              return {
+                error: `Couldn't stage the attached file for ${meta.slug}: ${e?.message ?? e}. Try removing and re-uploading the file.`,
+              };
+            }
+          }
           const rawResult: any = await executeTool(meta.slug, USER_ID, safeArgs);
           const result: any = clampToolResult(meta.slug, rawResult);
           if (result && result.successful === false) {
@@ -130,6 +177,28 @@ function lastUserText(messages: CoreMessage[]): string {
     }
   }
   return "";
+}
+
+// Compact view of the recent conversation for the router's context window.
+// We include up to the last 3 user/assistant turns and skip the active one
+// (the latest user message) since it's passed separately.
+function recentTurnsForRouter(messages: CoreMessage[]): string {
+  const trimmed: { role: string; text: string }[] = [];
+  for (let i = messages.length - 2; i >= 0 && trimmed.length < 6; i--) {
+    const m = messages[i]!;
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    let text = "";
+    if (typeof m.content === "string") text = m.content;
+    else if (Array.isArray(m.content)) {
+      text = m.content
+        .map((p: any) => (typeof p === "string" ? p : p?.text ?? ""))
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (!text) continue;
+    trimmed.unshift({ role: m.role, text: text.slice(0, 240) });
+  }
+  return trimmed.map((t) => `${t.role}: ${t.text}`).join("\n");
 }
 
 // stream a fixed assistant message in the AI SDK Data Stream Protocol format.
@@ -346,7 +415,10 @@ Bun.serve({
 
         let decision: RouteDecision;
         try {
-          decision = await route(prompt, connected);
+          decision = await route(prompt, connected, {
+            recentTurns: recentTurnsForRouter(messages),
+            hasAttachments: attachments.length > 0,
+          });
         } catch (err: any) {
           const msg = err?.message ?? String(err);
           console.error("[chat] router error:", msg);
@@ -486,7 +558,11 @@ Rules:
 
         // interactive
         const tools = await getToolsBySlugs(decision.selectedToolSlugs);
-        const turnState: TurnState = { blockedCount: new Map(), fatalBlock: false };
+        const turnState: TurnState = {
+          blockedCount: new Map(),
+          fatalBlock: false,
+          attachments,
+        };
         const toolMap: Record<string, any> = {};
         for (const t of tools)
           Object.assign(toolMap, makeAITool(t, decision.intent, turnState));
@@ -500,12 +576,15 @@ Rules:
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
         const attachmentBlock = attachments.length
-          ? `\n\nThe user has attached file(s) on this turn. Use these when calling email-sending or upload tools — pass the local 'path' as the attachment argument (or whatever attachment field the tool expects; consult its input schema):\n${attachments
-              .map(
-                (a) =>
-                  `- id=${a.id} filename="${a.filename}" mime=${a.mime} size=${a.size} path=${a.path}`,
-              )
-              .join("\n")}`
+          ? `\n\nUploaded file(s) available on this turn (the platform handles uploading them to the right destination — DO NOT ask the user for s3 keys, paths, MIME types, or any technical detail):
+${attachments
+  .map((a) => `- filename="${a.filename}", mime=${a.mime}, size=${a.size}`)
+  .join("\n")}
+
+When calling a send tool that has an "attachment" parameter, you can either:
+  (a) omit attachment entirely — the server will auto-fill it from the uploads above; OR
+  (b) pass attachment: { name: "<filename from above>", mimetype: "<mime>", s3key: "auto" }
+The server intercepts the call, resolves the staged S3 key, and substitutes a valid attachment object. Either way, just CALL the tool — never tell the user you can't find the file.`
           : "";
 
         // email_triage already handled and early-returned above; this slot is
@@ -530,9 +609,22 @@ Briefly introduce yourself and what you can do (3-5 short sentences):
               const note = s?.gmailQuery
                 ? `\nNote: prompt mentioned filters (${s.gmailQuery}) — those belong to read flows, ignore here.`
                 : "";
+              const hasAttach = attachments.length > 0;
+              const attachClause = hasAttach
+                ? `- The user has ALREADY uploaded ${attachments.length} file${attachments.length === 1 ? "" : "s"} via the UI. Their internal metadata (id, filename, mime, size, local path) is listed in the attachment block above this message. You HAVE the path. Pass it directly to the send tool's attachment parameter (try arg names like \`attachment\`, \`attachments\`, \`file_path\`, \`attached_files\` — inspect the tool's input schema).
+- NEVER ask the user for: the file's S3 key, file path, MIME type, size, internal id, or any other implementation detail. Those are app internals — the user does not know them and should not be asked. If you find yourself asking "what is the S3 key" or "what is the file path", STOP and just use the metadata above.
+- If exactly 1 file is attached, use it without asking which one.
+- If 2+ files are attached and the user did not say which, ASK by filename only ("Which file: 'a.pdf' or 'b.pdf'?").
+- If the user said "PDF" but the attached file is e.g. a PNG, attach the actual file anyway and briefly note the mismatch ("I see an attached image, not a PDF — attaching it as-is.")`
+                : `- The user has NOT uploaded any file. If they say "with the attached PDF" or similar, ASK them to upload the file via the paperclip button in the composer. Do not pretend an attachment exists.`;
               return `\n\nIntent: send_email. Use the Gmail SEND tool (look for SEND_EMAIL / GMAIL_SEND_EMAIL).
-- You need: recipient(s), subject, body. ASK the user for whichever is missing — do NOT invent a recipient.
-- If attachments are listed above, include them via the tool's attachment parameter using the local 'path'.
+
+Resolving fields from the conversation (look at the FULL conversation history above, not just the latest message):
+- recipient(s): the user may have given this in an earlier turn (e.g. a single email address on its own line). Reuse it.
+- subject: if the user has not specified, default to a polite short subject derived from the body — "Hi" if the body is just "hi", or the first ~6 words of the body otherwise. Do NOT keep asking for a subject after the user has signaled urgency ("just send him hi").
+- body: if the user said "just send him X", "say X", "tell her X" — body = X verbatim. Do NOT keep asking.
+${attachClause}
+- Only ASK for a field if it is GENUINELY missing across the entire conversation. Never ask for the same thing twice. Never ask for technical details.
 - Do not pick a DRAFT-only tool when the user asked to SEND. If only a DRAFT tool is available, create the draft and tell the user clearly that it's a draft, not a sent email.${note}`;
             }
             case "calendar_schedule": {
@@ -588,6 +680,8 @@ Operating rules:
 - Do not invent placeholder values like "1a2b3c4d5e6f7890", "<id>", "your_id". Real IDs must come from a previous tool result; to act on a specific message/event/file you must list/search for it first.
 - If a tool returns {error:...}, surface the error and suggest a concrete fix; do NOT keep retrying the same call with the same args.
 - If the tool only supports a per-call max (e.g. up to 500 results), do NOT tell the user "I can only fetch N". Just fetch the max it supports and slice to what the user asked for.
+- NEVER ask the user for internal implementation details: S3 keys, file paths, local paths, MIME types, file sizes, internal IDs, content type headers. If a tool needs these, the system has already given them to you in the system prompt's attachment/context blocks. Read those blocks.
+- Look at the FULL conversation history when answering follow-up messages. A bare email address, a date, or "just say hi" is a continuation of the prior task, not a new task.
 - Be concise. A few sentences plus a compact list when relevant.${intentBlock}${attachmentBlock}`;
 
         const sd = new StreamData();
