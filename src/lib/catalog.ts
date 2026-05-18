@@ -29,10 +29,17 @@ function inferToolkit(slug: string, raw: any): string {
 }
 
 async function loadCatalog(): Promise<ToolMeta[]> {
-  const raw = await composio.tools.getRawComposioTools({
-    toolkits: [...ALLOWED_TOOLKITS],
-    limit: 1000,
-  });
+  // Fetch per-toolkit with a generous per-toolkit cap so a large toolkit
+  // (github ~867 tools) doesn't crowd out a small one (googlesuper ~190+).
+  // The previous single call with limit:1000 truncated googlesuper at "E".
+  const raw: any[] = [];
+  for (const tk of ALLOWED_TOOLKITS) {
+    const got = await composio.tools.getRawComposioTools({
+      toolkits: [tk],
+      limit: 1000,
+    });
+    raw.push(...got);
+  }
   const out: ToolMeta[] = [];
   for (const t of raw) {
     const slug: string | undefined = (t as any).slug ?? (t as any).name;
