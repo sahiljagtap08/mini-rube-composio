@@ -31,7 +31,12 @@ await getCatalog().catch((err) =>
   console.error("[startup] catalog preload failed:", err?.message ?? err),
 );
 
-function makeAITool(meta: ToolMeta, intent: Intent) {
+type TurnState = {
+  blockedCount: Map<string, number>;
+  fatalBlock: boolean;
+};
+
+function makeAITool(meta: ToolMeta, intent: Intent, turn: TurnState) {
   return {
     [meta.slug]: tool({
       description: meta.description || meta.slug,
@@ -39,22 +44,30 @@ function makeAITool(meta: ToolMeta, intent: Intent) {
       execute: async (args) => {
         console.log(`[tool:exec] ${meta.slug}`, JSON.stringify(args).slice(0, 300));
 
-        // Belt-and-suspenders: even if the router somehow let a mutating tool
-        // through for a read-only intent, refuse to run it.
-        if (isReadOnlyIntent(intent) && isMutating(meta.slug)) {
-          const err = `Refusing to run mutating tool ${meta.slug} during read-only intent (${intent}). Pick a list/search/get tool instead.`;
-          console.error(`[tool:block] ${err}`);
-          return { error: err };
+        function recordBlock(reason: string) {
+          const n = (turn.blockedCount.get(meta.slug) ?? 0) + 1;
+          turn.blockedCount.set(meta.slug, n);
+          let body = reason;
+          if (n >= 2) {
+            turn.fatalBlock = true;
+            body += ` This is attempt ${n} — STOP calling this tool. Either pick a different available tool, or tell the user you cannot complete the request with the tools you have.`;
+          }
+          console.error(`[tool:block] ${body}`);
+          return { error: body };
         }
 
-        // Block obvious hallucinated IDs / placeholders. Force the model to
-        // obtain a real ID from a previous list/search call (or ask the user).
+        if (isReadOnlyIntent(intent) && isMutating(meta.slug)) {
+          return recordBlock(
+            `Refusing to run mutating tool ${meta.slug} during read-only intent (${intent}).`,
+          );
+        }
+
         const fakes = findPlaceholders(args);
         if (fakes.length) {
           const detail = fakes.map((f) => `${f.path}="${f.value}"`).join(", ");
-          const err = `Refusing to call ${meta.slug} with placeholder values: ${detail}. Obtain real IDs from a list/search tool first, or ask the user.`;
-          console.error(`[tool:block] ${err}`);
-          return { error: err };
+          return recordBlock(
+            `Refusing to call ${meta.slug} with placeholder values: ${detail}. Obtain real IDs from a list/search tool first, or ask the user.`,
+          );
         }
 
         try {
@@ -63,7 +76,6 @@ function makeAITool(meta: ToolMeta, intent: Intent) {
             USER_ID,
             args as Record<string, unknown>,
           );
-          // Composio returns { successful, error, data, ... } — normalize failures
           if (result && result.successful === false) {
             const msg = result.error ?? "tool reported failure";
             console.error(`[tool:fail] ${meta.slug}: ${msg}`);
@@ -219,6 +231,22 @@ Bun.serve({
             { connected: false, pending: timedOut, error: msg },
             { status: 200 },
           );
+        }
+      },
+    },
+
+    // Route-only endpoint: returns the router decision without executing any
+    // tools. Safe for smoke tests / dry runs.
+    "/api/route": {
+      async POST(req) {
+        try {
+          const body = (await req.json()) as { prompt?: string };
+          const prompt = body.prompt ?? "";
+          const connected = await getConnectedToolkits(USER_ID);
+          const decision = await route(prompt, connected);
+          return Response.json({ ...decision, connected: [...connected] });
+        } catch (err: any) {
+          return Response.json({ error: err?.message ?? String(err) }, { status: 500 });
         }
       },
     },
@@ -383,8 +411,10 @@ Bun.serve({
 
         // interactive
         const tools = await getToolsBySlugs(decision.selectedToolSlugs);
+        const turnState: TurnState = { blockedCount: new Map(), fatalBlock: false };
         const toolMap: Record<string, any> = {};
-        for (const t of tools) Object.assign(toolMap, makeAITool(t, decision.intent));
+        for (const t of tools)
+          Object.assign(toolMap, makeAITool(t, decision.intent, turnState));
 
         const slugList = tools.map((t) => t.slug).join(", ") || "(none)";
         const today = new Date();
@@ -457,7 +487,7 @@ Operating rules:
           system,
           messages,
           tools: toolMap,
-          maxSteps: 12,
+          maxSteps: 6,
           onFinish({ finishReason, usage }) {
             console.log(
               `[chat] finish reason=${finishReason} usage=${JSON.stringify(usage)}`,

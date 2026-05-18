@@ -188,11 +188,13 @@ const SEND_VERBS = ["send", "compose", "email", "mail"];
 const CREATE_VERBS = ["create", "schedule", "add", "book", "make", "set up", "setup"];
 const DELETE_VERBS = ["delete", "remove", "cancel", "archive", "trash"];
 
-const READ_SLUG_RX = /\b(FETCH|LIST|SEARCH|GET|READ|MESSAGES?|THREADS?|SNIPPET|PROFILE|VIEW)\b/;
-const SEND_SLUG_RX = /\b(SEND|REPLY|FORWARD)\b/;
-const CREATE_SLUG_RX = /\b(CREATE|INSERT|SCHEDULE|ADD)\b/;
-const DELETE_SLUG_RX = /\b(DELETE|REMOVE|CANCEL|ARCHIVE|TRASH)\b/;
-const MUTATE_SLUG_RX = /\b(SEND|CREATE|UPDATE|ADD|REMOVE|MODIFY|DELETE|TRASH|ARCHIVE|REPLY|FORWARD|MOVE|INSERT|APPLY|MARK_AS|CLOSE|CANCEL|LOCK|TRANSFER|UPLOAD)\b/;
+// Underscore-aware boundaries (JS \b treats _ as a word char, which breaks
+// matching against Composio slugs like GOOGLESUPER_BATCH_MODIFY_MESSAGES).
+const READ_SLUG_RX = /(?:^|_)(?:FETCH|LIST|SEARCH|GET|READ|MESSAGES?|THREADS?|SNIPPET|PROFILE|VIEW)(?:_|$)/;
+const SEND_SLUG_RX = /(?:^|_)(?:SEND|REPLY|FORWARD)(?:_|$)/;
+const CREATE_SLUG_RX = /(?:^|_)(?:CREATE|INSERT|SCHEDULE|ADD)(?:_|$)/;
+const DELETE_SLUG_RX = /(?:^|_)(?:DELETE|REMOVE|CANCEL|ARCHIVE|TRASH)(?:_|$)/;
+const MUTATE_SLUG_RX = /(?:^|_)(?:SEND|CREATE|UPDATE|ADD|REMOVE|MODIFY|DELETE|TRASH|ARCHIVE|REPLY|FORWARD|MOVE|INSERT|APPLY|MARK_AS|CLOSE|CANCEL|LOCK|TRANSFER|UPLOAD|BATCH|STAR|UNSTAR|PATCH)(?:_|$)/;
 
 function hasAny(text: string, words: string[]): boolean {
   return words.some((w) => text.includes(w));
