@@ -88,8 +88,8 @@ For each user prompt, return:
 ${PROFILE_DESCRIPTIONS}
 
 - mode:
-  - "interactive" — small, one-shot work via the tool-using LLM loop (send 1 email, schedule 1 event, read recent K messages). conversational intents are ALWAYS interactive with empty tool_slugs.
-  - "long_job" — bulk extraction that would overflow context (e.g. "all issues in repo X to a sheet", "every resume in this drive folder to a sheet").
+  - "interactive" — small, one-shot work via the tool-using LLM loop (send 1 email, schedule 1 event, read recent K messages, summarize a handful of issues/files). conversational intents are ALWAYS interactive with empty tool_slugs.
+  - "long_job" — STRICT: pick this ONLY if the prompt asks to write output into a Google Sheet/Spreadsheet (look for "sheet", "spreadsheet", "csv", "table") OR processes 50+ items with "all"/"every". Summarizing 5 or 20 things in chat is NOT long_job — it's interactive.
   - "clarify" — request is ambiguous or missing required input (no repo, no folder URL, no recipient for "send an email"). Greetings and capability questions are NOT clarify — they are conversational + interactive with no tools.
 
 - tool_slugs: the MINIMUM set of slugs from the shortlist that will be needed. Slugs MUST appear in the shortlist exactly. For conversational intent, return [].
@@ -199,8 +199,34 @@ export async function route(
 
   // Intent-based filter (the safety layer the user asked for)
   const filtered = filterToolsByIntent(obj.intent, modelSelected);
-  const selected = filtered.allowed;
+  let selected = filtered.allowed;
   const blocked = filtered.blocked;
+
+  // Recovery: if the model returned zero usable tools for an action intent,
+  // pull the highest-scoring shortlist tools that pass the filter. Without
+  // this, prompts like "read my last 100 emails" can end up with no tools.
+  const actionIntents = new Set([
+    "email_triage",
+    "send_email",
+    "calendar_schedule",
+  ]);
+  if (
+    selected.length === 0 &&
+    actionIntents.has(obj.intent) &&
+    obj.mode !== "clarify"
+  ) {
+    const recovered = filterToolsByIntent(
+      obj.intent,
+      shortlist.map((t) => t.slug),
+    );
+    const top = recovered.allowed.slice(0, 3);
+    if (top.length > 0) {
+      console.log(
+        `[router] recovery: model returned no tools for intent=${obj.intent}; falling back to top shortlist [${top.join(", ")}]`,
+      );
+      selected = top;
+    }
+  }
 
   // compute required toolkits from filtered selection + job_type hint
   const required = new Set<string>(obj.required_toolkits ?? []);

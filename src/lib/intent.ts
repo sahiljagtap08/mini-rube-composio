@@ -74,7 +74,16 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
   },
   send_email: {
     description: "Compose and send one email (optionally with attachment).",
-    allow: [/SEND/, /CREATE_DRAFT/, /UPDATE_DRAFT/, /ATTACHMENT/, /UPLOAD/],
+    allow: [
+      /SEND/,
+      /DRAFT/,
+      /COMPOSE/,
+      /CREATE_EMAIL/,
+      /CREATE_MAIL/,
+      /MAIL_SEND/,
+      /EMAIL_SEND/,
+      /ATTACHMENT/,
+    ],
     deny: [
       /DELETE/,
       /TRASH/,
