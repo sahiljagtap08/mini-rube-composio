@@ -410,6 +410,73 @@ Bun.serve({
           );
         }
 
+        // --- deterministic email_triage path ---
+        // Composio's FETCH_EMAILS returns full message bodies + base64
+        // attachments which is way too big for the model context. We bypass
+        // the generic tool loop entirely: fetch lean, sanitize + rank in code,
+        // feed the model only the compact top-N for natural-language wording.
+        if (decision.intent === "email_triage") {
+          const triage = await runEmailTriage(prompt, USER_ID);
+          const today = new Date().toISOString().slice(0, 10);
+          const sd = new StreamData();
+          sd.append({ ...routerMeta, intent: "email_triage" } as any);
+          sd.append({
+            kind: "triage",
+            ...triage.stats,
+            error: triage.error,
+          } as any);
+
+          if (triage.error) {
+            return dataStreamReply(
+              `I tried to fetch your emails but the Gmail tool failed: ${triage.error}\n\nTry reconnecting Google or check the server logs.`,
+              { ...routerMeta, kind: "error", stage: "fetch_emails", error: triage.error },
+            );
+          }
+
+          const triagePayload = JSON.stringify(triage.topEmails, null, 2);
+          const intro =
+            triage.stats.fetched === 0
+              ? `No emails were returned (fetched=0). Acknowledge to the user and suggest checking the Gmail connection or label filters.`
+              : `I already fetched ${triage.stats.fetched} recent email${triage.stats.fetched === 1 ? "" : "s"} and ranked them. The top ${triage.topEmails.length} by importance are below.`;
+
+          const system = `You are mini-rube. Today is ${today}.
+
+${intro}
+
+\`\`\`json
+${triagePayload}
+\`\`\`
+
+Write the user a clean, concise response:
+1. One short sentence acknowledging "I read N emails and surfaced the top M important ones."
+2. A numbered list of the ${triage.topEmails.length} emails, each item:
+   - **Sender** — Subject
+   - *date · one-line reason it looks important* (cite the label IMPORTANT/STARRED/UNREAD, or sender quality, or urgency keyword you noticed in subject/snippet)
+3. If labels and/or snippets are missing for some, just say so briefly — don't invent details.
+
+Do NOT call any tool. Do NOT show the raw JSON. Do NOT list more than ${triage.topEmails.length} items. Be tight and useful.`;
+
+          const result = streamText({
+            model,
+            system,
+            messages,
+            maxSteps: 1,
+            onFinish({ finishReason, usage }) {
+              console.log(
+                `[chat] finish reason=${finishReason} usage=${JSON.stringify(usage)}`,
+              );
+              sd.append({ kind: "finish", finishReason, usage } as any);
+              sd.close();
+            },
+            onError({ error }) {
+              const msg = (error as any)?.message ?? String(error);
+              console.error("[streamText:error]", msg);
+              sd.append({ kind: "error", stage: "streamText", error: msg } as any);
+            },
+          });
+          return result.toDataStreamResponse({ data: sd });
+        }
+
         // interactive
         const tools = await getToolsBySlugs(decision.selectedToolSlugs);
         const turnState: TurnState = { blockedCount: new Map(), fatalBlock: false };
