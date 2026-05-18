@@ -1,132 +1,134 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
+import { Header } from "./components/Header";
+import { Composer } from "./components/Composer";
+import { MessageList } from "./components/MessageList";
+import { EmptyState } from "./components/EmptyState";
+import { ErrorStack, type AppError } from "./components/ErrorCard";
+import type { Toolkit } from "./components/ConnectionChips";
+import type { RouteMeta } from "./components/AgentRunSteps";
+import type { Attachment } from "./components/AttachmentChips";
 
-type ToolEntry = { slug: string; description: string };
-type UploadInfo = { id: string; filename: string; mime: string; size: number };
+type UploadInfo = Attachment;
+
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
 
 export default function App() {
+  // attachments live in a ref so prepareRequestBody can read the *latest*
+  // value at submit time without re-creating useChat.
   const [attachments, setAttachments] = useState<UploadInfo[]>([]);
   const attachmentsRef = useRef<UploadInfo[]>([]);
   attachmentsRef.current = attachments;
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, error, data } =
-    useChat({
-      api: "/api/chat",
-      experimental_prepareRequestBody: ({ messages }) => ({
-        messages,
-        data: { attachments: attachmentsRef.current.map((a) => ({ id: a.id })) },
-      }),
-      onResponse(res) {
-        console.log(
-          `%c[chat] response ${res.status} ${res.statusText}`,
-          "color:#888",
-        );
-        if (!res.ok) {
-          res
-            .clone()
-            .text()
-            .then((t) => console.error("[chat] error body:", t))
-            .catch(() => {});
-        }
-      },
-      onError(err) {
-        console.error("[chat] error:", err);
-      },
-      onFinish(message, opts) {
-        console.log("[chat] finished:", { message, ...opts });
-      },
-    });
+  const [errors, setErrors] = useState<AppError[]>([]);
+  const pushError = (e: Omit<AppError, "id">) =>
+    setErrors((cur) => [...cur, { id: uid(), ...e }]);
+  const dismissError = (id: string) =>
+    setErrors((cur) => cur.filter((e) => e.id !== id));
 
-  const lastSeenDataIdx = useRef(0);
+  const {
+    messages,
+    input,
+    handleInputChange,
+    handleSubmit,
+    isLoading,
+    error: chatError,
+    data,
+    append,
+  } = useChat({
+    api: "/api/chat",
+    experimental_prepareRequestBody: ({ messages }) => ({
+      messages,
+      data: { attachments: attachmentsRef.current.map((a) => ({ id: a.id })) },
+    }),
+    onResponse(res) {
+      console.log(
+        `%c[chat] response ${res.status} ${res.statusText}`,
+        "color:#888",
+      );
+      if (!res.ok) {
+        res
+          .clone()
+          .text()
+          .then((t) => console.error("[chat] error body:", t))
+          .catch(() => {});
+      }
+    },
+    onError(err) {
+      console.error("[chat] error:", err);
+      pushError({
+        kind: "provider",
+        message: err.message || "The chat request failed. Check the server logs.",
+      });
+    },
+    onFinish(message, opts) {
+      console.log("[chat] finished:", { message, opts });
+    },
+  });
+
+  // Surface server-streamed data parts (route meta / streamText errors) into
+  // both the DevTools console and our route-meta map. Each `kind:"route"` data
+  // entry corresponds to the *next* assistant message about to stream.
+  const lastSeen = useRef(0);
+  const [metaByAssistantIndex, setMetaByIdx] = useState<Map<number, RouteMeta>>(
+    new Map(),
+  );
+
   useEffect(() => {
     if (!data) return;
-    for (let i = lastSeenDataIdx.current; i < data.length; i++) {
-      const part = data[i];
-      const kind = (part as any)?.kind;
-      if (kind === "error") console.error("[chat:meta]", part);
-      else if (kind === "route") console.log("%c[chat:route]", "color:#0a7", part);
-      else if (kind === "finish") console.log("%c[chat:finish]", "color:#888", part);
-      else console.log("[chat:meta]", part);
+    for (let i = lastSeen.current; i < data.length; i++) {
+      const part = data[i] as any;
+      const kind = part?.kind;
+      if (kind === "error") {
+        console.error("[chat:meta]", part);
+        pushError({
+          kind: part.stage === "streamText" ? "tool" : "provider",
+          message:
+            (part.error as string) ?? "An upstream error occurred mid-stream.",
+        });
+      } else if (kind === "route") {
+        console.log("%c[chat:route]", "color:#0a7;font-weight:600", part);
+      } else if (kind === "finish") {
+        console.log("%c[chat:finish]", "color:#888", part);
+      } else {
+        console.log("[chat:meta]", part);
+      }
     }
-    lastSeenDataIdx.current = data.length;
+    lastSeen.current = data.length;
+
+    // Build assistant-index → meta map: each `kind:"route"` event in `data`
+    // immediately precedes one assistant message.
+    const map = new Map<number, RouteMeta>();
+    let idx = 0;
+    for (const part of data as any[]) {
+      if (part?.kind === "route") {
+        map.set(idx, part as RouteMeta);
+        idx += 1;
+      }
+    }
+    setMetaByIdx(map);
   }, [data]);
 
-  const [activeTool, setActiveTool] = useState("loading...");
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [allTools, setAllTools] = useState<ToolEntry[]>([]);
-  const [search, setSearch] = useState("");
+  // Connection state
   const [connections, setConnections] = useState<Record<string, boolean>>({});
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const chatRef = useRef<HTMLDivElement>(null);
+  const [pendingConn, setPendingConn] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    fetch("/api/connections")
-      .then((r) => r.json() as Promise<{ connected: Record<string, boolean> }>)
-      .then((d) => setConnections(d.connected ?? {}))
-      .catch(() => {});
-  }, []);
-
-  async function uploadFile(file: File) {
-    setUploading(true);
+  async function refreshConnections() {
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const res = await fetch("/api/upload", { method: "POST", body: form });
-      const data = (await res.json()) as UploadInfo & { error?: string };
-      if (data.error) {
-        alert("upload failed: " + data.error);
-      } else {
-        setAttachments((cur) => [...cur, data]);
-      }
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      const r = await fetch("/api/connections");
+      const j = (await r.json()) as { connected?: Record<string, boolean> };
+      setConnections(j.connected ?? {});
+    } catch (e: any) {
+      console.warn("[connections] refresh failed:", e?.message ?? e);
     }
   }
-
-  function removeAttachment(id: string) {
-    setAttachments((cur) => cur.filter((a) => a.id !== id));
-  }
-
-  function onSubmitWithAttachments(e: React.FormEvent) {
-    handleSubmit(e);
-    setAttachments([]);
-  }
-
   useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages]);
-
-  useEffect(() => {
-    fetch("/api/tool")
-      .then((r) => r.json() as Promise<{ slug: string }>)
-      .then((d) => setActiveTool(d.slug));
+    refreshConnections();
   }, []);
 
-  async function openPicker() {
-    setPickerOpen(true);
-    setSearch("");
-    if (allTools.length === 0) {
-      const res = await fetch("/api/tools");
-      const data = (await res.json()) as { tools?: ToolEntry[] };
-      setAllTools(data.tools || []);
-    }
-  }
-
-  async function selectTool(slug: string) {
-    setPickerOpen(false);
-    setActiveTool("loading...");
-    const res = await fetch("/api/tool/set", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug }),
-    });
-    const data = (await res.json()) as { error?: string; slug?: string };
-    setActiveTool(data.error ? "error" : data.slug ?? "unknown");
-  }
-
-  async function safeJson(res: Response): Promise<any> {
+  async function safeJson<T>(res: Response): Promise<T> {
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("application/json")) {
       const text = await res.text().catch(() => "");
@@ -134,174 +136,143 @@ export default function App() {
         `non-JSON response (status ${res.status}): ${text.slice(0, 200)}`,
       );
     }
-    return res.json();
+    return res.json() as Promise<T>;
   }
 
-  async function connect(toolkit: string) {
+  async function onConnect(toolkit: Toolkit) {
+    setPendingConn((c) => ({ ...c, [toolkit]: true }));
     try {
       const startRes = await fetch(`/api/connect/${toolkit}`, { method: "POST" });
-      const startData = (await safeJson(startRes).catch((e) => ({ error: e.message }))) as {
-        redirectUrl?: string;
-        error?: string;
-      };
-      if (!startData.redirectUrl) {
-        console.error("[connect] start failed:", startData.error);
-        alert(`Couldn't start ${toolkit} connection: ${startData.error ?? "unknown error"}`);
+      const start = await safeJson<{ redirectUrl?: string; error?: string }>(
+        startRes,
+      );
+      if (!start.redirectUrl) {
+        pushError({
+          kind: "connection",
+          message: start.error
+            ? `Couldn't start ${toolkit} connection: ${start.error}`
+            : `Couldn't start ${toolkit} connection.`,
+        });
         return;
       }
-      window.open(startData.redirectUrl, "_blank", "width=600,height=700");
+      window.open(start.redirectUrl, "_blank", "width=600,height=720");
 
-      // Poll up to ~3 minutes (server waits 25s per call, plus retries).
       const MAX_ATTEMPTS = 8;
       for (let i = 0; i < MAX_ATTEMPTS; i++) {
-        let waitData: { connected?: boolean; pending?: boolean; error?: string };
         try {
-          const r = await fetch(`/api/connect/${toolkit}/wait`, { method: "POST" });
-          waitData = await safeJson(r);
+          const r = await fetch(`/api/connect/${toolkit}/wait`, {
+            method: "POST",
+          });
+          const w = await safeJson<{
+            connected?: boolean;
+            pending?: boolean;
+            error?: string;
+          }>(r);
+          if (w.connected) {
+            setConnections((c) => ({ ...c, [toolkit]: true }));
+            return;
+          }
+          if (!w.pending) {
+            pushError({
+              kind: "connection",
+              message: w.error ?? `${toolkit} connection failed.`,
+            });
+            return;
+          }
         } catch (e: any) {
-          console.warn("[connect] wait parse failed:", e.message);
-          continue;
+          console.warn("[connect] wait parse failed:", e?.message ?? e);
         }
-        if (waitData.connected) {
-          console.log(`[connect] ${toolkit} connected`);
-          setConnections((c) => ({ ...c, [toolkit]: true }));
-          return;
-        }
-        if (!waitData.pending) {
-          console.error("[connect] non-pending failure:", waitData.error);
-          alert(`Connection for ${toolkit} failed: ${waitData.error}`);
-          return;
-        }
-        console.log(`[connect] ${toolkit} still pending (attempt ${i + 1})`);
       }
-      alert(
-        `Connection for ${toolkit} did not complete in time. Finish authorizing in the popup and try the Connect button again.`,
-      );
+      pushError({
+        kind: "connection",
+        message: `${toolkit === "googlesuper" ? "Google" : "GitHub"} connection is still pending. Finish authorizing in the popup and click Connect again.`,
+      });
     } catch (e: any) {
-      console.error("[connect] error:", e);
-      alert(`Connection error for ${toolkit}: ${e.message ?? e}`);
+      pushError({
+        kind: "connection",
+        message: `Connection error for ${toolkit}: ${e?.message ?? e}`,
+      });
+    } finally {
+      setPendingConn((c) => ({ ...c, [toolkit]: false }));
+      refreshConnections();
     }
   }
 
-  const filtered = search
-    ? allTools.filter(
-        (t) =>
-          t.slug.toLowerCase().includes(search.toLowerCase()) ||
-          t.description.toLowerCase().includes(search.toLowerCase())
-      )
-    : allTools;
+  // Attachments
+  const [uploading, setUploading] = useState(false);
+  async function onUploadFile(file: File) {
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const data = await safeJson<UploadInfo & { error?: string }>(res);
+      if (data.error) {
+        pushError({ kind: "upload", message: data.error });
+        return;
+      }
+      setAttachments((cur) => [...cur, data]);
+    } catch (e: any) {
+      pushError({ kind: "upload", message: e?.message ?? String(e) });
+    } finally {
+      setUploading(false);
+    }
+  }
+  function onRemoveAttachment(id: string) {
+    setAttachments((cur) => cur.filter((a) => a.id !== id));
+  }
+
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    handleSubmit(e);
+    setAttachments([]);
+  }
+
+  function onPickSuggestion(prompt: string) {
+    append({ role: "user", content: prompt });
+  }
+
+  const hasMessages = messages.length > 0;
+  useEffect(() => {
+    if (chatError) {
+      // Already pushed via onError; nothing extra to do here. Keep effect so
+      // we can extend with retry UI later.
+    }
+  }, [chatError]);
+
+  // Memoize the meta map (already state, just stabilizes ref for child)
+  const metaMap = useMemo(() => metaByAssistantIndex, [metaByAssistantIndex]);
 
   return (
-    <>
-      <header>
-        <h1>mini rube</h1>
-        <div className="header-right">
-          {["googlesuper", "github"].map((tk) => (
-            <button
-              key={tk}
-              className={`connect-btn${connections[tk] ? " connected" : ""}`}
-              onClick={() => connect(tk)}
-            >
-              {connections[tk] ? `${tk} connected` : `Connect ${tk}`}
-            </button>
-          ))}
+    <div className="app">
+      <Header
+        connections={connections}
+        pending={pendingConn}
+        onConnect={onConnect}
+      />
+      <main className="app-main">
+        <ErrorStack errors={errors} onDismiss={dismissError} />
+        <div className="content">
+          {hasMessages ? (
+            <MessageList
+              messages={messages}
+              metaByAssistantIndex={metaMap}
+              isStreaming={isLoading}
+            />
+          ) : (
+            <EmptyState onPick={onPickSuggestion} />
+          )}
         </div>
-      </header>
-
-      <div className="tool-bar">
-        <label>Active tool:</label>
-        <span className="active-tool">{activeTool}</span>
-        <button onClick={openPicker}>Change</button>
-      </div>
-
-      <div className="chat" ref={chatRef}>
-        {messages.map((m) => (
-          <div key={m.id} className={`msg ${m.role}`}>
-            {m.content}
-          </div>
-        ))}
-        {error && <div className="msg error">{error.message}</div>}
-      </div>
-
-      {attachments.length > 0 && (
-        <div className="attachment-bar">
-          {attachments.map((a) => (
-            <span key={a.id} className="attachment-chip" title={`${a.mime} · ${a.size}B`}>
-              📎 {a.filename}
-              <button onClick={() => removeAttachment(a.id)} aria-label="remove">
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      <form className="input-bar" onSubmit={onSubmitWithAttachments}>
-        <input
-          ref={fileInputRef}
-          type="file"
-          style={{ display: "none" }}
-          onChange={(e) => {
-            const f = (e.target as HTMLInputElement).files?.[0];
-            if (f) uploadFile(f);
-          }}
-        />
-        <button
-          type="button"
-          className="attach-btn"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading || isLoading}
-          title="Attach a file"
-        >
-          {uploading ? "…" : "📎"}
-        </button>
-        <input
+        <Composer
           value={input}
           onChange={handleInputChange}
-          placeholder="Ask me anything..."
-          autoComplete="off"
-          disabled={isLoading}
+          onSubmit={onSubmit}
+          attachments={attachments}
+          uploading={uploading}
+          onUploadFile={onUploadFile}
+          onRemoveAttachment={onRemoveAttachment}
+          isLoading={isLoading}
         />
-        <button type="submit" disabled={isLoading || !input.trim()}>
-          Send
-        </button>
-      </form>
-
-      {pickerOpen && (
-        <div className="tool-picker-overlay" onClick={() => setPickerOpen(false)}>
-          <div className="tool-picker" onClick={(e) => e.stopPropagation()}>
-            <div className="tool-picker-header">
-              <input
-                value={search}
-                onChange={(e) => setSearch((e.target as HTMLInputElement).value)}
-                placeholder="Search tools..."
-                autoFocus
-              />
-              <button className="close-btn" onClick={() => setPickerOpen(false)}>
-                &times;
-              </button>
-            </div>
-            <div className="tool-list">
-              {allTools.length === 0 ? (
-                <div className="tool-list-loading">Loading tools...</div>
-              ) : filtered.length === 0 ? (
-                <div className="tool-list-loading">No tools found</div>
-              ) : (
-                filtered.slice(0, 100).map((t) => (
-                  <div
-                    key={t.slug}
-                    className={`tool-item${t.slug === activeTool ? " active" : ""}`}
-                    onClick={() => selectTool(t.slug)}
-                  >
-                    <div className="slug">{t.slug}</div>
-                    <div className="desc">{t.description.slice(0, 100)}</div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+      </main>
+    </div>
   );
 }
