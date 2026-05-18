@@ -75,7 +75,9 @@ Given the user's prompt and a SHORTLIST of candidate tools (slug, toolkit, short
 Heuristics:
 - "all", "every", "each", "list of N (N>~50)", "into a sheet", "into a spreadsheet" → likely long_job.
 - "send", "schedule", "reply", "draft", "read my last K" with small K → interactive.
-- If the user references partial names (e.g. "karan"), still proceed; downstream tools can search contacts.
+- If the user references a person by partial name (e.g. "with karan"), include a contacts/people search tool alongside the calendar tool so the agent can resolve the email.
+- For "important emails out of last N", include a Gmail list/search tool (the agent will rely on metadata + snippets), plus optionally a get-message tool for follow-up reads.
+- For sending email with an attachment, include the Gmail send tool; the agent will pass the attachment via that tool's attachment parameter.
 
 Never invent slugs. If shortlist is empty or insufficient, return mode="clarify" with a helpful clarify_question.`;
 
@@ -83,7 +85,7 @@ export async function route(
   prompt: string,
   connectedToolkits: Set<string>,
 ): Promise<RouteDecision> {
-  const shortlist = await shortlistTools(prompt, 35);
+  const shortlist = await shortlistTools(prompt, 50);
 
   const compact = shortlist
     .map((t) => `- ${t.slug} [${t.toolkit}]: ${(t.description || "").slice(0, 140)}`)

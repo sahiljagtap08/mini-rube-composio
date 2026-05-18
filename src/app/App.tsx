@@ -2,17 +2,64 @@ import React, { useState, useEffect, useRef } from "react";
 import { useChat } from "@ai-sdk/react";
 
 type ToolEntry = { slug: string; description: string };
+type UploadInfo = { id: string; filename: string; mime: string; size: number };
 
 export default function App() {
+  const [attachments, setAttachments] = useState<UploadInfo[]>([]);
+  const attachmentsRef = useRef<UploadInfo[]>([]);
+  attachmentsRef.current = attachments;
+
   const { messages, input, handleInputChange, handleSubmit, isLoading, error } =
-    useChat({ api: "/api/chat" });
+    useChat({
+      api: "/api/chat",
+      experimental_prepareRequestBody: ({ messages }) => ({
+        messages,
+        data: { attachments: attachmentsRef.current.map((a) => ({ id: a.id })) },
+      }),
+    });
 
   const [activeTool, setActiveTool] = useState("loading...");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [allTools, setAllTools] = useState<ToolEntry[]>([]);
   const [search, setSearch] = useState("");
   const [connections, setConnections] = useState<Record<string, boolean>>({});
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fetch("/api/connections")
+      .then((r) => r.json() as Promise<{ connected: Record<string, boolean> }>)
+      .then((d) => setConnections(d.connected ?? {}))
+      .catch(() => {});
+  }, []);
+
+  async function uploadFile(file: File) {
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const data = (await res.json()) as UploadInfo & { error?: string };
+      if (data.error) {
+        alert("upload failed: " + data.error);
+      } else {
+        setAttachments((cur) => [...cur, data]);
+      }
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((cur) => cur.filter((a) => a.id !== id));
+  }
+
+  function onSubmitWithAttachments(e: React.FormEvent) {
+    handleSubmit(e);
+    setAttachments([]);
+  }
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -99,7 +146,38 @@ export default function App() {
         {error && <div className="msg error">{error.message}</div>}
       </div>
 
-      <form className="input-bar" onSubmit={handleSubmit}>
+      {attachments.length > 0 && (
+        <div className="attachment-bar">
+          {attachments.map((a) => (
+            <span key={a.id} className="attachment-chip" title={`${a.mime} · ${a.size}B`}>
+              📎 {a.filename}
+              <button onClick={() => removeAttachment(a.id)} aria-label="remove">
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <form className="input-bar" onSubmit={onSubmitWithAttachments}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = (e.target as HTMLInputElement).files?.[0];
+            if (f) uploadFile(f);
+          }}
+        />
+        <button
+          type="button"
+          className="attach-btn"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading || isLoading}
+          title="Attach a file"
+        >
+          {uploading ? "…" : "📎"}
+        </button>
         <input
           value={input}
           onChange={handleInputChange}

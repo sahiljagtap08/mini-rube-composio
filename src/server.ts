@@ -10,6 +10,7 @@ import {
   type ToolMeta,
 } from "./lib/catalog";
 import { route, type RouteDecision } from "./lib/router";
+import { saveUpload, getUpload, type Upload } from "./lib/uploads";
 
 const USER_ID = "candidate";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -38,14 +39,25 @@ function makeAITool(meta: ToolMeta) {
       execute: async (args) => {
         console.log(`[tool:exec] ${meta.slug}`, JSON.stringify(args).slice(0, 300));
         try {
-          return await executeTool(meta.slug, USER_ID, args as Record<string, unknown>);
-        } catch (err: any) {
-          console.error(
-            `[tool:err] ${meta.slug}:`,
-            err?.message,
-            err?.cause ?? "",
+          const result: any = await executeTool(
+            meta.slug,
+            USER_ID,
+            args as Record<string, unknown>,
           );
-          return { error: err?.message ?? String(err) };
+          // Composio returns { successful, error, data, ... } — normalize failures
+          if (result && result.successful === false) {
+            const msg = result.error ?? "tool reported failure";
+            console.error(`[tool:fail] ${meta.slug}: ${msg}`);
+            return {
+              error: msg,
+              hint: "Consider whether arguments match the tool's input schema or whether the relevant toolkit is connected.",
+            };
+          }
+          return result;
+        } catch (err: any) {
+          const msg = err?.message ?? String(err);
+          console.error(`[tool:err] ${meta.slug}:`, msg, err?.cause ?? "");
+          return { error: msg };
         }
       },
     }),
@@ -179,6 +191,31 @@ Bun.serve({
       },
     },
 
+    "/api/upload": {
+      async POST(req) {
+        try {
+          const form = await req.formData();
+          const file = form.get("file");
+          if (!(file instanceof File)) {
+            return Response.json({ error: "expected multipart field 'file'" }, { status: 400 });
+          }
+          const MAX = 25 * 1024 * 1024;
+          if (file.size > MAX) {
+            return Response.json({ error: `file too large (max ${MAX} bytes)` }, { status: 413 });
+          }
+          const u = await saveUpload(file);
+          return Response.json({
+            id: u.id,
+            filename: u.filename,
+            mime: u.mime,
+            size: u.size,
+          });
+        } catch (err: any) {
+          return Response.json({ error: err?.message ?? String(err) }, { status: 500 });
+        }
+      },
+    },
+
     // ---- legacy endpoints kept so the existing UI doesn't 404. ----
     // The chat path no longer reads from these; they will go away when the UI
     // is reworked in a later phase.
@@ -214,9 +251,24 @@ Bun.serve({
 
     "/api/chat": {
       async POST(req) {
-        const body = (await req.json()) as { messages?: CoreMessage[] };
+        const body = (await req.json()) as {
+          messages?: CoreMessage[];
+          data?: { attachments?: Array<{ id: string }> };
+          attachments?: Array<{ id: string }>;
+        };
         const messages: CoreMessage[] = body.messages ?? [];
         const prompt = lastUserText(messages);
+        const attachmentRefs = body.data?.attachments ?? body.attachments ?? [];
+        const attachments: Upload[] = attachmentRefs
+          .map((a) => getUpload(a.id))
+          .filter((x): x is Upload => !!x);
+        if (attachments.length) {
+          console.log(
+            `[chat] attachments=${attachments
+              .map((a) => `${a.filename}(${a.size}b)`)
+              .join(", ")}`,
+          );
+        }
 
         console.log(`\n[chat] prompt="${prompt.slice(0, 200)}"`);
         const connected = await getConnectedToolkits(USER_ID);
@@ -266,11 +318,34 @@ Bun.serve({
         for (const t of tools) Object.assign(toolMap, makeAITool(t));
 
         const slugList = tools.map((t) => t.slug).join(", ") || "(none)";
-        const system = `You are a helpful general agent acting on behalf of the user.
+        const today = new Date();
+        const todayISO = today.toISOString().slice(0, 10);
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+        const attachmentBlock = attachments.length
+          ? `\n\nThe user has attached file(s) on this turn. Use these when calling email-sending or upload tools — pass the local 'path' as the attachment argument (or whatever attachment field the tool expects; consult its input schema):\n${attachments
+              .map(
+                (a) =>
+                  `- id=${a.id} filename="${a.filename}" mime=${a.mime} size=${a.size} path=${a.path}`,
+              )
+              .join("\n")}`
+          : "";
+
+        const system = `You are mini-rube, a general agent for the user's Google apps and GitHub.
+Today is ${todayISO} (timezone ${tz}). "Tomorrow", "next week" etc. are relative to this.
+
 Available tools for this turn: ${slugList}.
+
+Operating rules:
 - Use tools when they help; otherwise just answer.
-- Validate inputs; if a required argument is missing, ask the user.
-- Be concise. Summarize results clearly.`;
+- If a required argument is missing (recipient, repo, folder URL, date/time), ASK the user instead of guessing.
+- If a tool returns {error:...}, surface the error to the user and suggest a concrete fix; do NOT keep retrying the same call with the same args.
+- Be concise. Summarize results in a few sentences plus a compact list if relevant.
+
+Task-specific guidance:
+- "Show important emails out of the last N": first call the Gmail list/search tool with a query like 'newer_than:30d' or maxResults=N to retrieve metadata + snippets only. Rank importance by Gmail labels (IMPORTANT, STARRED), sender reputation (real people > bulk senders), and snippet keywords. Present the top ~10 with sender, subject, one-line reason. Do NOT fetch the full body for every email — only optionally for the top few if the user asks for details.
+- Scheduling a calendar event with a partial name (e.g. "with karan"): FIRST search Google Contacts / People for that name using the available contacts tool. If you find exactly one confident match, use their email as the attendee. If you find multiple candidates or none, ask the user to confirm the email. Never invent an email address. Default event length is 30 minutes if not specified.
+- Sending an email with an attachment: inspect the email-send tool's input schema for an 'attachment' / 'attachments' parameter. Pass the local file 'path' provided above (most Composio file tools accept a local path; if the schema requires base64 or a Drive file id, adapt accordingly and tell the user what you did).${attachmentBlock}`;
 
         const result = streamText({
           model: openrouter("moonshotai/kimi-k2"),
