@@ -1,10 +1,12 @@
-import { useRef, type FormEvent, type ChangeEvent, type KeyboardEvent } from "react";
+import { useRef, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowUpIcon, PaperclipIcon, Spinner } from "./icons";
 import { AttachmentChips, type Attachment } from "./AttachmentChips";
 
 type Props = {
   value: string;
-  onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
+  // useChat's handleInputChange is typed for HTMLInputElement but the SDK
+  // accepts either; we keep the type permissive and cast at the call site.
+  onChange: (e: any) => void;
   onSubmit: (e: FormEvent<HTMLFormElement>) => void;
   attachments: Attachment[];
   uploading: boolean;
