@@ -37,7 +37,7 @@ export function clampToolArgs(slug: string, args: Args): Args {
 
 // Truncate large tool results so the model doesn't ingest megabytes. We try to
 // preserve the response shape so the model can still parse it.
-export function clampToolResult(slug: string, result: any): any {
+export function clampToolResult(_slug: string, result: any): any {
   if (result == null) return result;
   try {
     const json = JSON.stringify(result);
