@@ -245,8 +245,22 @@ export async function route(
     required.add("googlesuper");
   }
 
-  const jobType: JobType =
+  let jobType: JobType =
     obj.job_type === "none" ? null : (obj.job_type as JobType);
+
+  // Hard guard: long_job requires explicit sheet/spreadsheet output.
+  // Without it, the model often misclassifies "summarize 5 issues" as long_job.
+  const lower = prompt.toLowerCase();
+  const mentionsSheet = /\b(sheet|spreadsheet|csv)\b/.test(lower);
+  let demotedMode: typeof obj.mode = obj.mode;
+  if (obj.mode === "long_job" && !mentionsSheet) {
+    console.log(
+      `[router] demoting long_job → interactive (prompt has no "sheet"/"spreadsheet" output target)`,
+    );
+    demotedMode = "interactive";
+    jobType = null;
+  }
+  obj.mode = demotedMode;
 
   // conversational always short-circuits to a no-tools interactive turn,
   // even if the model returned something else.
