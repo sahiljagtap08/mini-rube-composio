@@ -145,7 +145,7 @@ const ALIAS: Record<string, string[]> = {
   tomorrow: ["calendar", "event"],
   today: ["calendar", "event"],
   invite: ["calendar", "event", "meeting"],
-  important: ["gmail", "label", "starred"],
+  important: ["gmail", "starred"],
   unread: ["gmail", "label"],
   search: ["query", "find"],
   reply: ["gmail", "email", "message"],
@@ -165,6 +165,39 @@ function expand(tokens: string[]): string[] {
   return [...out];
 }
 
+// Verbs in the prompt drive which *action family* of slugs we boost. This
+// prevents tools like ADD_LABEL from winning a read-style prompt just because
+// they share keywords ("important", "email").
+const READ_VERBS = [
+  "read",
+  "show",
+  "list",
+  "fetch",
+  "search",
+  "find",
+  "view",
+  "get",
+  "summarize",
+  "summary",
+  "rank",
+  "triage",
+  "see",
+  "check",
+];
+const SEND_VERBS = ["send", "compose", "email", "mail"];
+const CREATE_VERBS = ["create", "schedule", "add", "book", "make", "set up", "setup"];
+const DELETE_VERBS = ["delete", "remove", "cancel", "archive", "trash"];
+
+const READ_SLUG_RX = /\b(FETCH|LIST|SEARCH|GET|READ|MESSAGES?|THREADS?|SNIPPET|PROFILE|VIEW)\b/;
+const SEND_SLUG_RX = /\b(SEND|REPLY|FORWARD)\b/;
+const CREATE_SLUG_RX = /\b(CREATE|INSERT|SCHEDULE|ADD)\b/;
+const DELETE_SLUG_RX = /\b(DELETE|REMOVE|CANCEL|ARCHIVE|TRASH)\b/;
+const MUTATE_SLUG_RX = /\b(SEND|CREATE|UPDATE|ADD|REMOVE|MODIFY|DELETE|TRASH|ARCHIVE|REPLY|FORWARD|MOVE|INSERT|APPLY|MARK_AS|CLOSE|CANCEL|LOCK|TRANSFER|UPLOAD)\b/;
+
+function hasAny(text: string, words: string[]): boolean {
+  return words.some((w) => text.includes(w));
+}
+
 export async function shortlistTools(
   prompt: string,
   limit = 30,
@@ -172,8 +205,19 @@ export async function shortlistTools(
   const cat = await getCatalog();
   const tokens = expand(tokenize(prompt));
   if (tokens.length === 0) return [];
+  const lower = prompt.toLowerCase();
+  const wantsRead = hasAny(lower, READ_VERBS);
+  const wantsSend = hasAny(lower, SEND_VERBS);
+  const wantsCreate = hasAny(lower, CREATE_VERBS);
+  const wantsDelete = hasAny(lower, DELETE_VERBS);
+  // "read my last 100 emails and show me the important ones" is read-only even
+  // though it contains "email" (which overlaps SEND_VERBS via the alias). When
+  // read verbs are present and there's no explicit "send", treat as read.
+  const readOnly = wantsRead && !/\bsend\b/.test(lower) && !wantsCreate && !wantsDelete;
+
   const scored = cat.map((t) => {
     const slug = t.slug.toLowerCase();
+    const slugUp = t.slug.toUpperCase();
     const desc = t.description.toLowerCase();
     let score = 0;
     for (const tok of tokens) {
@@ -181,6 +225,16 @@ export async function shortlistTools(
       else if (slug.includes(tok)) score += 1;
       if (wordBoundaryHit(desc, tok)) score += 1;
     }
+    if (score === 0) return { t, score };
+    // action-family boosts
+    if (wantsRead && READ_SLUG_RX.test(slugUp)) score += 5;
+    if (wantsSend && SEND_SLUG_RX.test(slugUp)) score += 5;
+    if (wantsCreate && CREATE_SLUG_RX.test(slugUp)) score += 5;
+    if (wantsDelete && DELETE_SLUG_RX.test(slugUp)) score += 5;
+    // strong anti-boost: read-only intent must not surface mutating tools
+    if (readOnly && MUTATE_SLUG_RX.test(slugUp)) score -= 8;
+    // mild anti-boost: a non-send prompt shouldn't pick SEND tools
+    if (!wantsSend && SEND_SLUG_RX.test(slugUp)) score -= 3;
     return { t, score };
   });
   scored.sort((a, b) => b.score - a.score);

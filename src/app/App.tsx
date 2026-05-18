@@ -126,16 +126,60 @@ export default function App() {
     setActiveTool(data.error ? "error" : data.slug ?? "unknown");
   }
 
+  async function safeJson(res: Response): Promise<any> {
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.includes("application/json")) {
+      const text = await res.text().catch(() => "");
+      throw new Error(
+        `non-JSON response (status ${res.status}): ${text.slice(0, 200)}`,
+      );
+    }
+    return res.json();
+  }
+
   async function connect(toolkit: string) {
-    const res = await fetch(`/api/connect/${toolkit}`, { method: "POST" });
-    const data = (await res.json()) as { redirectUrl?: string };
-    if (data.redirectUrl) {
-      window.open(data.redirectUrl, "_blank", "width=600,height=700");
-      const waitRes = await fetch(`/api/connect/${toolkit}/wait`, { method: "POST" });
-      const waitData = (await waitRes.json()) as { connected?: boolean };
-      if (waitData.connected) {
-        setConnections((c) => ({ ...c, [toolkit]: true }));
+    try {
+      const startRes = await fetch(`/api/connect/${toolkit}`, { method: "POST" });
+      const startData = (await safeJson(startRes).catch((e) => ({ error: e.message }))) as {
+        redirectUrl?: string;
+        error?: string;
+      };
+      if (!startData.redirectUrl) {
+        console.error("[connect] start failed:", startData.error);
+        alert(`Couldn't start ${toolkit} connection: ${startData.error ?? "unknown error"}`);
+        return;
       }
+      window.open(startData.redirectUrl, "_blank", "width=600,height=700");
+
+      // Poll up to ~3 minutes (server waits 25s per call, plus retries).
+      const MAX_ATTEMPTS = 8;
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        let waitData: { connected?: boolean; pending?: boolean; error?: string };
+        try {
+          const r = await fetch(`/api/connect/${toolkit}/wait`, { method: "POST" });
+          waitData = await safeJson(r);
+        } catch (e: any) {
+          console.warn("[connect] wait parse failed:", e.message);
+          continue;
+        }
+        if (waitData.connected) {
+          console.log(`[connect] ${toolkit} connected`);
+          setConnections((c) => ({ ...c, [toolkit]: true }));
+          return;
+        }
+        if (!waitData.pending) {
+          console.error("[connect] non-pending failure:", waitData.error);
+          alert(`Connection for ${toolkit} failed: ${waitData.error}`);
+          return;
+        }
+        console.log(`[connect] ${toolkit} still pending (attempt ${i + 1})`);
+      }
+      alert(
+        `Connection for ${toolkit} did not complete in time. Finish authorizing in the popup and try the Connect button again.`,
+      );
+    } catch (e: any) {
+      console.error("[connect] error:", e);
+      alert(`Connection error for ${toolkit}: ${e.message ?? e}`);
     }
   }
 

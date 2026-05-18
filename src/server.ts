@@ -11,6 +11,13 @@ import {
 import { route, type RouteDecision } from "./lib/router";
 import { saveUpload, getUpload, type Upload } from "./lib/uploads";
 import { model, MODEL_ID, PROVIDER } from "./lib/ai";
+import {
+  isReadOnlyIntent,
+  isMutating,
+  findPlaceholders,
+  INTENT_PROFILES,
+  type Intent,
+} from "./lib/intent";
 
 const USER_ID = "candidate";
 
@@ -24,13 +31,32 @@ await getCatalog().catch((err) =>
   console.error("[startup] catalog preload failed:", err?.message ?? err),
 );
 
-function makeAITool(meta: ToolMeta) {
+function makeAITool(meta: ToolMeta, intent: Intent) {
   return {
     [meta.slug]: tool({
       description: meta.description || meta.slug,
       parameters: jsonSchema(meta.inputSchema ?? { type: "object", properties: {} }),
       execute: async (args) => {
         console.log(`[tool:exec] ${meta.slug}`, JSON.stringify(args).slice(0, 300));
+
+        // Belt-and-suspenders: even if the router somehow let a mutating tool
+        // through for a read-only intent, refuse to run it.
+        if (isReadOnlyIntent(intent) && isMutating(meta.slug)) {
+          const err = `Refusing to run mutating tool ${meta.slug} during read-only intent (${intent}). Pick a list/search/get tool instead.`;
+          console.error(`[tool:block] ${err}`);
+          return { error: err };
+        }
+
+        // Block obvious hallucinated IDs / placeholders. Force the model to
+        // obtain a real ID from a previous list/search call (or ask the user).
+        const fakes = findPlaceholders(args);
+        if (fakes.length) {
+          const detail = fakes.map((f) => `${f.path}="${f.value}"`).join(", ");
+          const err = `Refusing to call ${meta.slug} with placeholder values: ${detail}. Obtain real IDs from a list/search tool first, or ask the user.`;
+          console.error(`[tool:block] ${err}`);
+          return { error: err };
+        }
+
         try {
           const result: any = await executeTool(
             meta.slug,
@@ -123,7 +149,11 @@ function dataStreamReply(text: string, meta?: unknown): Response {
 function formatDecision(d: RouteDecision): string {
   return [
     `mode=${d.mode}`,
+    `intent=${d.intent}`,
     `tools=[${d.selectedToolSlugs.join(", ") || "(none)"}]`,
+    d.blockedToolSlugs.length
+      ? `blocked=[${d.blockedToolSlugs.map((b) => b.slug).join(",")}]`
+      : null,
     d.jobType ? `job=${d.jobType}` : null,
     d.authToolkits?.length ? `missing=${d.authToolkits.join(",")}` : null,
     `reason="${d.reason}"`,
@@ -134,6 +164,8 @@ function formatDecision(d: RouteDecision): string {
 
 Bun.serve({
   port: 3001,
+  // OAuth flows can take more than the 10s default. Give /wait headroom.
+  idleTimeout: 60,
   routes: {
     "/api/connect/:toolkit": {
       async POST(req) {
@@ -158,22 +190,35 @@ Bun.serve({
       },
     },
 
+    // Poll-friendly wait endpoint. Waits up to 25s for the link to flip to
+    // connected. On timeout returns 200 + {connected:false, pending:true} so
+    // the frontend can simply retry without worrying about non-JSON bodies.
     "/api/connect/:toolkit/wait": {
       async POST(req) {
         const toolkit = req.params.toolkit;
         const link = pendingConnections.get(toolkit);
         if (!link) {
+          // Maybe they're already connected — check live status first.
+          const live = await getConnectedToolkits(USER_ID);
+          if (live.has(toolkit)) {
+            return Response.json({ connected: true, toolkit });
+          }
           return Response.json(
-            { error: "No pending connection for " + toolkit },
-            { status: 400 },
+            { connected: false, pending: false, error: "no pending connection — start by POSTing /api/connect/:toolkit" },
+            { status: 200 },
           );
         }
         try {
-          await link.waitForConnection(60_000);
+          await link.waitForConnection(25_000);
           pendingConnections.delete(toolkit);
           return Response.json({ connected: true, toolkit });
         } catch (err: any) {
-          return Response.json({ error: err.message }, { status: 500 });
+          const msg = err?.message ?? String(err);
+          const timedOut = /timeout|timed out|deadline|exceed/i.test(msg);
+          return Response.json(
+            { connected: false, pending: timedOut, error: msg },
+            { status: 200 },
+          );
         }
       },
     },
@@ -287,7 +332,9 @@ Bun.serve({
         const routerMeta = {
           kind: "route",
           mode: decision.mode,
+          intent: decision.intent,
           tools: decision.selectedToolSlugs,
+          blocked: decision.blockedToolSlugs,
           reason: decision.reason,
           jobType: decision.jobType,
           authToolkits: decision.authToolkits ?? null,
@@ -337,7 +384,7 @@ Bun.serve({
         // interactive
         const tools = await getToolsBySlugs(decision.selectedToolSlugs);
         const toolMap: Record<string, any> = {};
-        for (const t of tools) Object.assign(toolMap, makeAITool(t));
+        for (const t of tools) Object.assign(toolMap, makeAITool(t, decision.intent));
 
         const slugList = tools.map((t) => t.slug).join(", ") || "(none)";
         const today = new Date();
@@ -353,21 +400,54 @@ Bun.serve({
               .join("\n")}`
           : "";
 
+        const intentBlock = (() => {
+          switch (decision.intent) {
+            case "conversational":
+              return `\n\nThis is a greeting or capability question. Do NOT call any tool.
+Briefly introduce yourself and what you can do (3-5 short sentences):
+- Email triage — read recent Gmail and surface the important messages.
+- Send email — compose and send a message, including with file attachments.
+- Schedule calendar events — create events, resolving partial names via Google Contacts.
+- GitHub → Sheet — dump issues from a repo into a Google Sheet.
+- Drive → Sheet — extract structured info (e.g. resumes) from a Drive folder into a Sheet.`;
+            case "email_triage":
+              return `\n\nIntent: email_triage (READ ONLY). You may ONLY call list/search/get Gmail tools. NEVER call ADD_LABEL, SEND, DELETE, ARCHIVE, TRASH, MODIFY, DRAFT or any mutating tool — even if "important" appears in the prompt; that means RANK by Gmail's IMPORTANT label, not apply it.
+Steps:
+1. Call the Gmail list/search tool once with maxResults equal to the user's N (or 100 if they said "last 100"). Get metadata + snippets only.
+2. Rank in-memory by labelIds (IMPORTANT, STARRED), sender (real person > bulk/no-reply), and snippet keywords.
+3. Present the top ~10 with sender, subject, and a one-line reason. Optionally offer to fetch full bodies for specific ones.
+Do not fetch full bodies for every email.`;
+            case "send_email":
+              return `\n\nIntent: send_email. Use the Gmail send tool.
+- Confirm you have: recipient(s), subject, body. If any is missing, ASK the user.
+- If attachments are listed above, include them via the tool's attachment parameter (use the local 'path').
+- Send only after the user-provided info is complete.`;
+            case "calendar_schedule":
+              return `\n\nIntent: calendar_schedule.
+Steps:
+1. If the user named a person by partial name, FIRST call the Contacts/People search tool with that name.
+2. If you get exactly one confident match, use their email as the attendee. If 0 or many, ASK the user to confirm the email — never invent one.
+3. Resolve dates ("tomorrow" → ${todayISO} + 1 day) in timezone ${tz}. Default duration 30 min.
+4. Call the calendar create-event tool.`;
+            case "github_issues_to_sheet":
+            case "drive_files_to_sheet":
+              return `\n\nIntent: ${decision.intent}. (Long-job executor still being wired — Phase 3.)`;
+            default:
+              return "";
+          }
+        })();
+
         const system = `You are mini-rube, a general agent for the user's Google apps and GitHub.
 Today is ${todayISO} (timezone ${tz}). "Tomorrow", "next week" etc. are relative to this.
 
+Routed intent: ${decision.intent} — ${INTENT_PROFILES[decision.intent].description}
 Available tools for this turn: ${slugList}.
 
 Operating rules:
-- Use tools when they help; otherwise just answer.
-- If a required argument is missing (recipient, repo, folder URL, date/time), ASK the user instead of guessing.
-- If a tool returns {error:...}, surface the error to the user and suggest a concrete fix; do NOT keep retrying the same call with the same args.
-- Be concise. Summarize results in a few sentences plus a compact list if relevant.
-
-Task-specific guidance:
-- "Show important emails out of the last N": first call the Gmail list/search tool with a query like 'newer_than:30d' or maxResults=N to retrieve metadata + snippets only. Rank importance by Gmail labels (IMPORTANT, STARRED), sender reputation (real people > bulk senders), and snippet keywords. Present the top ~10 with sender, subject, one-line reason. Do NOT fetch the full body for every email — only optionally for the top few if the user asks for details.
-- Scheduling a calendar event with a partial name (e.g. "with karan"): FIRST search Google Contacts / People for that name using the available contacts tool. If you find exactly one confident match, use their email as the attendee. If you find multiple candidates or none, ask the user to confirm the email. Never invent an email address. Default event length is 30 minutes if not specified.
-- Sending an email with an attachment: inspect the email-send tool's input schema for an 'attachment' / 'attachments' parameter. Pass the local file 'path' provided above (most Composio file tools accept a local path; if the schema requires base64 or a Drive file id, adapt accordingly and tell the user what you did).${attachmentBlock}`;
+- If a required argument is missing (recipient, repo, folder URL, date/time, ID), ASK the user — do not invent placeholder values like "1a2b3c4d5e6f7890", "<id>", "your_id".
+- Real IDs must come from a previous tool result. To act on a message/event/file you must list/search for it first.
+- If a tool returns {error:...}, surface the error and suggest a concrete fix; do NOT keep retrying the same call with the same args.
+- Be concise. A few sentences plus a compact list when relevant.${intentBlock}${attachmentBlock}`;
 
         const sd = new StreamData();
         sd.append(routerMeta as any);
