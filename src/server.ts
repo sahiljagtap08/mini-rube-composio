@@ -21,6 +21,10 @@ import {
 import { extractEmailSlots, extractEventSlots, extractGitHubSlots } from "./lib/slots";
 import { clampToolArgs, clampToolResult } from "./lib/toolGuards";
 import { runEmailTriage } from "./lib/handlers/emailTriage";
+import {
+  runCalendarSchedule,
+  formatEventSuccess,
+} from "./lib/handlers/calendarSchedule";
 
 const USER_ID = "candidate";
 
@@ -567,6 +571,77 @@ Rules:
           return result.toDataStreamResponse({ data: sd });
         }
 
+        // --- deterministic calendar_schedule path ---
+        // CREATE_EVENT is a mutation. The generic loop has been observed
+        // fabricating times ("tomorrow at 3 PM") and claiming success without
+        // ever calling the tool. We parse the time/duration/attendee in code,
+        // verify the tool actually returned a result, and build the final
+        // answer from real data only.
+        if (decision.intent === "calendar_schedule") {
+          const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          const recentTurns = recentTurnsForRouter(messages);
+          const outcome = await runCalendarSchedule(
+            prompt,
+            recentTurns,
+            USER_ID,
+            tz,
+          );
+          const calMeta = { ...routerMeta, intent: "calendar_schedule" };
+
+          if (outcome.status === "clarify") {
+            console.log(
+              `[calendar] clarify (${outcome.reason}): ${outcome.message.slice(0, 120)}`,
+            );
+            return dataStreamReply(outcome.message, {
+              ...calMeta,
+              kind: "calendar_clarify",
+              reason: outcome.reason,
+            });
+          }
+          if (outcome.status === "error") {
+            console.log(`[calendar] error: ${outcome.message.slice(0, 200)}`);
+            return dataStreamReply(outcome.message, {
+              ...calMeta,
+              kind: "calendar_error",
+              error: outcome.message,
+            });
+          }
+          // success — answer is built from the verified tool result only
+          const reply = formatEventSuccess(outcome, tz);
+          const enc = new TextEncoder();
+          const parts: string[] = [
+            `2:${JSON.stringify([calMeta])}\n`,
+            `2:${JSON.stringify([
+              {
+                kind: "action_success",
+                action: "create_event",
+                slug: "GOOGLESUPER_CREATE_EVENT",
+                start: outcome.start.toISOString(),
+                end: outcome.end.toISOString(),
+                attendees: outcome.attendees,
+                eventLink: outcome.eventLink ?? null,
+                meetLink: outcome.meetLink ?? null,
+              },
+            ])}\n`,
+            `0:${JSON.stringify(reply)}\n`,
+            `2:${JSON.stringify([{ kind: "finish", finishReason: "stop" }])}\n`,
+            `d:${JSON.stringify({ finishReason: "stop", usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+          ];
+          const stream = new ReadableStream({
+            start(controller) {
+              for (const p of parts) controller.enqueue(enc.encode(p));
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              "Content-Type": "text/plain; charset=utf-8",
+              "x-vercel-ai-data-stream": "v1",
+            },
+          });
+        }
+
         // interactive
         const tools = await getToolsBySlugs(decision.selectedToolSlugs);
         const sd = new StreamData();
@@ -601,12 +676,10 @@ When calling a send tool that has an "attachment" parameter, you can either:
 The server intercepts the call, resolves the staged S3 key, and substitutes a valid attachment object. Either way, just CALL the tool — never tell the user you can't find the file.`
           : "";
 
-        // email_triage already handled and early-returned above; this slot is
-        // only needed for the send_email branch now.
+        // email_triage and calendar_schedule are early-returned above; this
+        // slot is only needed for the send_email branch now.
         const emailSlots =
           decision.intent === "send_email" ? extractEmailSlots(prompt) : null;
-        const eventSlots =
-          decision.intent === "calendar_schedule" ? extractEventSlots(prompt) : null;
 
         const intentBlock = (() => {
           switch (decision.intent) {
@@ -650,22 +723,6 @@ ${attachClause}
 - Only ASK for a field if it is GENUINELY missing across the entire conversation. Never ask for the same thing twice. Never ask for technical details (no S3, no path, no MIME).
 - Do not pick a DRAFT-only tool when the user asked to SEND. If only a DRAFT tool is available, create the draft and tell the user clearly that it's a draft, not a sent email.${note}`;
             }
-            case "calendar_schedule": {
-              const s = eventSlots!;
-              const attendeeNote = s.attendees.length
-                ? `Attendee name(s) from prompt: ${s.attendees.join(", ")}. Search Contacts/People FIRST.`
-                : "No attendee specified — that's fine, single-person event is OK.";
-              const timeNote = s.time
-                ? `Time hint from prompt: ${s.time}.`
-                : `Time not specified — ASK the user for a time (date alone is not enough to create the event).`;
-              return `\n\nIntent: calendar_schedule. Extracted slots: date=${s.date ?? "?"}, time=${s.time ?? "?"}, duration=${s.durationMinutes}min, attendees=[${s.attendees.join(", ")}].
-
-ACT on safe defaults — do not over-clarify:
-1. ${attendeeNote} For each name: call the contacts SEARCH/GET tool. Exactly one confident match → use that email. Zero or many → ASK the user to confirm.
-2. Resolve relative dates against today (${todayISO}, tz ${tz}). "tomorrow" = ${todayISO} + 1 day. Default duration is ${s.durationMinutes} minutes.
-3. ${timeNote}
-4. Call the calendar CREATE_EVENT tool. Title the event clearly (include "mini-rube" for test events).`;
-            }
             case "github_read": {
               const s = extractGitHubSlots(prompt);
               const repoLine =
@@ -704,7 +761,9 @@ Operating rules:
 - If a tool returns {error:...}, surface the error and suggest a concrete fix; do NOT keep retrying the same call with the same args.
 - If the tool only supports a per-call max (e.g. up to 500 results), do NOT tell the user "I can only fetch N". Just fetch the max it supports and slice to what the user asked for.
 - NEVER ask the user for internal implementation details: S3 keys, file paths, local paths, MIME types, file sizes, internal IDs, content type headers. If a tool needs these, the system has already given them to you in the system prompt's attachment/context blocks. Read those blocks.
-- Look at the FULL conversation history when answering follow-up messages. A bare email address, a date, or "just say hi" is a continuation of the prior task, not a new task.
+- Look at the FULL conversation history when answering follow-up messages. A bare email address, a date, or "just say hi" is a continuation of the prior task, not a new task. BUT an explicit verb in the active prompt ("schedule…", "send…", "delete…", "read…") OVERRIDES prior context and starts a new task — don't carry stale recipient/attachment state into an unrelated request.
+- ANTI-HALLUCINATION (mutating actions): for any CREATE/UPDATE/DELETE/SEND/ADD/REMOVE/MODIFY/INSERT/PATCH action your final answer MUST be grounded in the actual tool result. If the tool was not called, OR returned successful=false, OR returned an error, OR you did not receive a result — DO NOT claim the action happened. Do NOT invent times, IDs, links, or confirmations. If you're unsure, say "I haven't done it yet — I need <X>."
+- For calendar/event creation specifically: never claim "scheduled for tomorrow at 3 PM" (or any time) unless you actually called CREATE_EVENT with those values AND the tool returned success. The user said "in 5 mins" means now + 5 minutes, not "tomorrow at some random time".
 - Be concise. A few sentences plus a compact list when relevant.${intentBlock}${attachmentBlock}`;
 
         const result = streamText({
