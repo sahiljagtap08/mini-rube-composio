@@ -151,11 +151,37 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
   },
 };
 
-const MUTATING_RX =
-  /\b(SEND|CREATE|UPDATE|DELETE|ADD|REMOVE|MOVE|MODIFY|TRASH|ARCHIVE|REPLY|FORWARD|CLOSE|CANCEL|LOCK|TRANSFER|MARK_AS|DRAFT|INSERT|APPEND|BATCH_UPDATE|CLEAR|UPLOAD|APPLY|PUT)\b/;
+// Composio slugs use UNDERSCORE-separated tokens. JS regex `\b` treats `_` as
+// a word char, so we tokenize on non-letters instead and check whole tokens.
+const MUTATING_TOKENS = new Set([
+  "SEND",
+  "CREATE",
+  "UPDATE",
+  "DELETE",
+  "ADD",
+  "REMOVE",
+  "MODIFY",
+  "TRASH",
+  "ARCHIVE",
+  "REPLY",
+  "FORWARD",
+  "CLOSE",
+  "CANCEL",
+  "LOCK",
+  "TRANSFER",
+  "INSERT",
+  "DRAFT",
+  "CLEAR",
+  "UPLOAD",
+  "APPLY",
+  "PUT",
+]);
 
 export function isMutating(slug: string): boolean {
-  return MUTATING_RX.test(slug.toUpperCase());
+  const up = slug.toUpperCase();
+  if (up.includes("MARK_AS")) return true;
+  const tokens = up.split(/[^A-Z]+/);
+  return tokens.some((t) => MUTATING_TOKENS.has(t));
 }
 
 export function isReadOnlyIntent(intent: Intent): boolean {
