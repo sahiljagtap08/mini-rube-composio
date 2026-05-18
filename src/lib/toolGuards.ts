@@ -13,17 +13,18 @@ export function clampToolArgs(slug: string, args: Args): Args {
   const out: Args = { ...args };
 
   if (slug === "GOOGLESUPER_FETCH_EMAILS") {
-    // Always metadata-only unless caller explicitly opted in.
+    // Force lean payload — Composio's default include_payload:true / verbose:true
+    // returns full bodies + base64 attachments which blows the model context.
     if (out.include_payload === undefined) out.include_payload = false;
     if (out.verbose === undefined) out.verbose = false;
-    // Hard cap at 50 to keep result under 80KB even with snippets.
-    const mr = typeof out.max_results === "number" ? out.max_results : 25;
-    out.max_results = Math.max(1, Math.min(mr, 50));
+    // Respect the user's requested count up to 100 (the assignment maximum).
+    const mr = typeof out.max_results === "number" ? out.max_results : 10;
+    out.max_results = Math.max(1, Math.min(mr, 100));
   }
 
   if (slug === "GOOGLESUPER_LIST_MESSAGES" || slug === "GOOGLESUPER_LIST_THREADS") {
     const mr = typeof out.max_results === "number" ? out.max_results : 25;
-    out.max_results = Math.max(1, Math.min(mr, 50));
+    out.max_results = Math.max(1, Math.min(mr, 100));
   }
 
   if (slug === "GITHUB_LIST_REPOSITORY_ISSUES" || slug === "GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS") {
