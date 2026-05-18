@@ -18,6 +18,7 @@ import {
   INTENT_PROFILES,
   type Intent,
 } from "./lib/intent";
+import { extractEmailSlots, extractEventSlots } from "./lib/slots";
 
 const USER_ID = "candidate";
 
