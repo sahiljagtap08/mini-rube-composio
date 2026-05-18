@@ -19,6 +19,8 @@ import {
   type Intent,
 } from "./lib/intent";
 import { extractEmailSlots, extractEventSlots, extractGitHubSlots } from "./lib/slots";
+import { clampToolArgs, clampToolResult } from "./lib/toolGuards";
+import { runEmailTriage } from "./lib/handlers/emailTriage";
 
 const USER_ID = "candidate";
 
@@ -72,11 +74,9 @@ function makeAITool(meta: ToolMeta, intent: Intent, turn: TurnState) {
         }
 
         try {
-          const result: any = await executeTool(
-            meta.slug,
-            USER_ID,
-            args as Record<string, unknown>,
-          );
+          const safeArgs = clampToolArgs(meta.slug, args as Record<string, unknown>);
+          const rawResult: any = await executeTool(meta.slug, USER_ID, safeArgs);
+          const result: any = clampToolResult(meta.slug, rawResult);
           if (result && result.successful === false) {
             const msg = result.error ?? "tool reported failure";
             console.error(`[tool:fail] ${meta.slug}: ${msg}`);
