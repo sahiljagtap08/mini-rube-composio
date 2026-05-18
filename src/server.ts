@@ -301,6 +301,13 @@ Bun.serve({
           );
         }
 
+        if (decision.mode === "error") {
+          return dataStreamReply(
+            decision.errorMessage ??
+              "Upstream LLM provider returned an error. Check server logs.",
+          );
+        }
+
         if (decision.mode === "long_job") {
           // Phase 2 will execute. For now report the plan honestly.
           return dataStreamReply(

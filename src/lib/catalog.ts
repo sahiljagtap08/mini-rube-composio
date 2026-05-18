@@ -98,8 +98,18 @@ const STOP = new Set([
 
 function tokenize(s: string): string[] {
   return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(
-    (t) => t.length > 1 && !STOP.has(t),
+    (t) => t.length >= 3 && !STOP.has(t),
   );
+}
+
+function wordBoundaryHit(haystack: string, needle: string): boolean {
+  // require alphanum boundary on both sides to avoid "yo" matching "your"
+  const i = haystack.indexOf(needle);
+  if (i < 0) return false;
+  const before = i === 0 ? "" : haystack[i - 1];
+  const after = haystack[i + needle.length] ?? "";
+  const isWord = (c: string) => /[a-z0-9]/i.test(c);
+  return !isWord(before ?? "") && !isWord(after);
 }
 
 const ALIAS: Record<string, string[]> = {
@@ -161,14 +171,15 @@ export async function shortlistTools(
 ): Promise<ToolMeta[]> {
   const cat = await getCatalog();
   const tokens = expand(tokenize(prompt));
-  if (tokens.length === 0) return cat.slice(0, limit);
+  if (tokens.length === 0) return [];
   const scored = cat.map((t) => {
     const slug = t.slug.toLowerCase();
     const desc = t.description.toLowerCase();
     let score = 0;
     for (const tok of tokens) {
-      if (slug.includes(tok)) score += 3;
-      if (desc.includes(tok)) score += 1;
+      if (wordBoundaryHit(slug, tok)) score += 3;
+      else if (slug.includes(tok)) score += 1;
+      if (wordBoundaryHit(desc, tok)) score += 1;
     }
     return { t, score };
   });

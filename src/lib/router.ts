@@ -10,7 +10,12 @@ const openrouter = createOpenAI({
   apiKey: OPENROUTER_API_KEY,
 });
 
-export type RouteMode = "interactive" | "long_job" | "auth_needed" | "clarify";
+export type RouteMode =
+  | "interactive"
+  | "long_job"
+  | "auth_needed"
+  | "clarify"
+  | "error";
 export type JobType =
   | "github_issues_to_sheet"
   | "drive_files_to_sheet"
@@ -24,7 +29,17 @@ export type RouteDecision = {
   clarifyQuestion?: string;
   authToolkits?: string[];
   requiredToolkits: string[];
+  errorMessage?: string;
 };
+
+function classifyLLMError(msg: string): "credits" | "rate_limit" | "auth" | "other" {
+  const m = msg.toLowerCase();
+  if (/insufficient.*credit|quota|payment|billing|out of credits/.test(m))
+    return "credits";
+  if (/rate.?limit|too many requests|429/.test(m)) return "rate_limit";
+  if (/unauthor|invalid.*key|forbidden|401|403/.test(m)) return "auth";
+  return "other";
+}
 
 type RouterModelOutput = {
   mode: "interactive" | "long_job" | "clarify";
@@ -104,9 +119,41 @@ export async function route(
     });
     obj = result.object;
   } catch (err: any) {
-    console.error("[router] generateObject failed:", err?.message ?? err);
-    // graceful fallback: keyword shortlist as interactive
+    const msg = err?.message ?? String(err);
+    console.error("[router] generateObject failed:", msg);
+    const kind = classifyLLMError(msg);
+    // For upstream LLM problems (credits, auth, rate limit) bail with a clear
+    // error mode — chat fallback would hit the same wall. For other errors
+    // (network, transient) keep a tiny keyword shortlist as a soft fallback,
+    // but only if the user prompt produced *some* relevant matches.
+    if (kind !== "other") {
+      let advice = "";
+      if (kind === "credits")
+        advice =
+          " The OpenRouter key bundled by scaffold.sh has run out. Top up at https://openrouter.ai/settings/credits or set OPENROUTER_API_KEY in .env to your own key.";
+      else if (kind === "auth")
+        advice = " Check that OPENROUTER_API_KEY in .env is valid.";
+      else if (kind === "rate_limit")
+        advice = " Wait a few seconds and try again.";
+      return {
+        mode: "error",
+        selectedToolSlugs: [],
+        reason: `LLM provider error (${kind})`,
+        jobType: null,
+        requiredToolkits: [],
+        errorMessage: msg + advice,
+      };
+    }
     const fallback = shortlist.slice(0, 5).map((t) => t.slug);
+    if (fallback.length === 0) {
+      return {
+        mode: "interactive",
+        selectedToolSlugs: [],
+        reason: `router LLM failed (${msg}); no obvious tool match — answering without tools`,
+        jobType: null,
+        requiredToolkits: [],
+      };
+    }
     const required = new Set<string>(
       shortlist.slice(0, 5).map((t) => t.toolkit),
     );
@@ -114,7 +161,7 @@ export async function route(
     return {
       mode: missing.length ? "auth_needed" : "interactive",
       selectedToolSlugs: fallback,
-      reason: `router LLM failed (${err?.message ?? "unknown"}); using keyword fallback`,
+      reason: `router LLM failed (${msg}); using keyword fallback`,
       jobType: null,
       requiredToolkits: [...required],
       authToolkits: missing.length ? missing : undefined,
