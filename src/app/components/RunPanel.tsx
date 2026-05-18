@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ToolInvocation } from "ai";
+import { ChevronRight } from "lucide-react";
 import type { RouteMeta, TriageStats } from "../types";
 import { describeTool, ServiceIcon, formatBytes, type Service } from "../utils/toolService";
 import { CheckIcon, Spinner, XIcon } from "./icons";
@@ -170,7 +171,13 @@ export function RunPanel({ meta, toolInvocations, triage, isStreaming }: Props) 
           onClick={() => setExpanded((v) => !v)}
           aria-expanded={expanded}
         >
-          {expanded ? "Hide run details" : "Show run details"}
+          <ChevronRight
+            size={14}
+            strokeWidth={2}
+            className={`run-toggle-chev ${expanded ? "is-open" : ""}`}
+            aria-hidden="true"
+          />
+          <span>{expanded ? "Hide run details" : "Show run details"}</span>
         </button>
       )}
 

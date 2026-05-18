@@ -139,12 +139,12 @@ code {
 .conn-chip {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 7px;
+  padding: 5px 12px 5px 10px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   color: var(--text-muted);
   transition: background 120ms ease, border-color 120ms ease;
@@ -152,11 +152,17 @@ code {
 .conn-chip:hover:not(:disabled) {
   background: var(--bg-soft);
 }
+.conn-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .conn-chip .conn-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--text-subtle);
+  background: var(--success);
+  margin-left: 2px;
 }
 .conn-chip.is-connected {
   color: var(--success);
@@ -184,38 +190,38 @@ code {
 .empty-state {
   margin: auto;
   width: 100%;
-  max-width: 720px;
-  padding: 64px 24px 48px;
+  max-width: 680px;
+  padding: 48px 20px 36px;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
 .empty-hero {
   text-align: center;
-  margin-bottom: 36px;
+  margin-bottom: 28px;
 }
 .empty-title {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--text);
 }
 .empty-sub {
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--text-muted);
-  font-size: 15px;
+  font-size: 14px;
 }
 .suggestions {
   width: 100%;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
 }
 .suggestion {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 10px;
+  padding: 11px 13px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -257,12 +263,12 @@ code {
 /* ===== messages ===== */
 .messages {
   width: 100%;
-  max-width: 760px;
+  max-width: 720px;
   margin: 0 auto;
-  padding: 32px 24px 24px;
+  padding: 24px 20px 18px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 20px;
 }
 
 .msg-row {
@@ -488,11 +494,14 @@ code {
 
 .run-toggle {
   align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12.5px;
   color: var(--text-muted);
   background: transparent;
   border: none;
-  padding: 2px 4px;
+  padding: 4px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: color 120ms ease, background 120ms ease;
@@ -501,15 +510,15 @@ code {
   color: var(--text);
   background: var(--bg-soft);
 }
-.run-toggle::before {
-  content: "▸ ";
-  font-size: 9px;
-  margin-right: 2px;
-  display: inline-block;
-  transform: translateY(-1px);
+.run-toggle-chev {
+  transition: transform 180ms ease;
+  color: var(--text-subtle);
 }
-.run-toggle[aria-expanded="true"]::before {
-  content: "▾ ";
+.run-toggle:hover .run-toggle-chev {
+  color: var(--text-muted);
+}
+.run-toggle-chev.is-open {
+  transform: rotate(90deg);
 }
 
 .run-meta {
@@ -576,9 +585,9 @@ code {
 /* ===== composer ===== */
 .composer-wrap {
   width: 100%;
-  max-width: 760px;
+  max-width: 720px;
   margin: 0 auto;
-  padding: 12px 24px 18px;
+  padding: 8px 20px 14px;
   display: flex;
   flex-direction: column;
   gap: 6px;

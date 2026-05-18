@@ -1,9 +1,16 @@
+import { GitHubIcon, GoogleGIcon } from "./serviceIcons";
+
 export type Toolkit = "googlesuper" | "github";
 
 const LABEL: Record<Toolkit, string> = {
   googlesuper: "Google",
   github: "GitHub",
 };
+
+function ToolkitIcon({ toolkit }: { toolkit: Toolkit }) {
+  if (toolkit === "googlesuper") return <GoogleGIcon size={14} />;
+  return <GitHubIcon size={14} />;
+}
 
 type Props = {
   connections: Record<string, boolean>;
@@ -27,7 +34,9 @@ export function ConnectionChips({ connections, pending, onConnect }: Props) {
             disabled={isPending}
             title={isConnected ? `${LABEL[tk]} is connected` : `Connect ${LABEL[tk]}`}
           >
-            <span className="conn-dot" aria-hidden="true" />
+            <span className="conn-chip-icon">
+              <ToolkitIcon toolkit={tk} />
+            </span>
             <span>
               {isPending
                 ? `Connecting ${LABEL[tk]}…`
@@ -35,6 +44,7 @@ export function ConnectionChips({ connections, pending, onConnect }: Props) {
                   ? `${LABEL[tk]} connected`
                   : `Connect ${LABEL[tk]}`}
             </span>
+            {isConnected && <span className="conn-dot" aria-hidden="true" />}
           </button>
         );
       })}

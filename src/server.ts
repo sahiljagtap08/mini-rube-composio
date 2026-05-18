@@ -633,12 +633,21 @@ Briefly introduce yourself and what you can do (3-5 short sentences):
                 : `- The user has NOT uploaded any file. If they say "with the attached PDF" or similar, ASK them to upload the file via the paperclip button in the composer. Do not pretend an attachment exists.`;
               return `\n\nIntent: send_email. Use the Gmail SEND tool (look for SEND_EMAIL / GMAIL_SEND_EMAIL).
 
-Resolving fields from the conversation (look at the FULL conversation history above, not just the latest message):
-- recipient(s): the user may have given this in an earlier turn (e.g. a single email address on its own line). Reuse it.
-- subject: if the user has not specified, default to a polite short subject derived from the body — "Hi" if the body is just "hi", or the first ~6 words of the body otherwise. Do NOT keep asking for a subject after the user has signaled urgency ("just send him hi").
+Resolving the recipient from the conversation:
+- If the user typed an email address like "x@y.com" — use it as recipient_email.
+- If the user typed a partial NAME like "nikhil", "karan", "send this to nikhil" — DO NOT pass the bare name to SEND_EMAIL (it returns "Invalid email format"). Instead:
+  1. Call the contacts search tool (SEARCH_PEOPLE / GET_PEOPLE / GET_CONTACTS) with that name as the query.
+  2. If you get exactly 1 confident match → confirm to the user briefly ("Found Nikhil Tirunagiri <nikhil@…>. Sending now.") and then call SEND_EMAIL.
+  3. If multiple matches → list them ("I found 3 contacts named Nikhil — which one? (1) … (2) … (3) …") and wait.
+  4. If 0 matches → ask the user for the email address directly ("I couldn't find a contact named Nikhil. What's their email?").
+- "this", "him", "her", "it" in the user's message refers to whatever is already in scope on this turn — an attached file, a previously discussed email, etc. The attachment block above (if present) lists files the user has uploaded.
+
+Resolving subject + body:
+- recipient(s): reuse any email/contact already resolved this conversation.
+- subject: if missing, default to a polite short subject derived from the body — "Hi" if the body is just "hi", or the first ~6 words of the body otherwise. Do NOT keep asking after the user signals urgency ("just send him hi").
 - body: if the user said "just send him X", "say X", "tell her X" — body = X verbatim. Do NOT keep asking.
 ${attachClause}
-- Only ASK for a field if it is GENUINELY missing across the entire conversation. Never ask for the same thing twice. Never ask for technical details.
+- Only ASK for a field if it is GENUINELY missing across the entire conversation. Never ask for the same thing twice. Never ask for technical details (no S3, no path, no MIME).
 - Do not pick a DRAFT-only tool when the user asked to SEND. If only a DRAFT tool is available, create the draft and tell the user clearly that it's a draft, not a sent email.${note}`;
             }
             case "calendar_schedule": {

@@ -11,6 +11,7 @@
     "@ai-sdk/react": "^1",
     "@composio/core": "^0.2.6",
     "ai": "^4",
+    "lucide-react": "^1.16.0",
     "react": "^19",
     "react-dom": "^19",
     "react-markdown": "^10.1.0"

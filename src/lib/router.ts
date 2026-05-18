@@ -295,6 +295,31 @@ export async function route(
         );
       }
     }
+    // If the conversation references a person by name and has no email
+    // address anywhere, also surface a contacts search tool so the agent can
+    // resolve the recipient before calling SEND_EMAIL.
+    const fullText = `${prompt}\n${ctx.recentTurns ?? ""}`;
+    const hasEmailAddr = /\S+@\S+\.\S+/.test(fullText);
+    const namePattern =
+      /\b(?:send|email|mail|forward|reply)\s+(?:this|that|it|him|her|them|to)\s+([a-z][a-z'\s]{1,30})\b/i;
+    const altNamePattern =
+      /\b(?:to|with)\s+([a-z][a-z'-]{1,25})\b(?!\s*@)/i;
+    const looksLikeName =
+      namePattern.test(fullText) || altNamePattern.test(fullText);
+    if (!hasEmailAddr && looksLikeName) {
+      const hasContact = selected.some((s) =>
+        /(SEARCH_PEOPLE|GET_PEOPLE|GET_CONTACTS|DIRECTORY)/.test(s.toUpperCase()),
+      );
+      if (!hasContact) {
+        const best = (await getBestContactsSearchTools()).slice(0, 1);
+        if (best.length > 0) {
+          selected = [best[0]!.slug, ...selected];
+          console.log(
+            `[router] recovery stage-2: injecting contacts tool [${best[0]!.slug}] for send_email — partial name detected, no email present`,
+          );
+        }
+      }
+    }
   }
   if (obj.intent === "github_read") {
     const hasIssueReadTool = selected.some((s) =>

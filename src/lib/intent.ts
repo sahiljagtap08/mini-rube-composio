@@ -92,6 +92,12 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
       /MAIL_SEND/,
       /EMAIL_SEND/,
       /ATTACHMENT/,
+      // Contacts lookup is part of the send-email flow — partial names like
+      // "send this to nikhil" should resolve via SEARCH_PEOPLE first.
+      /SEARCH_PEOPLE/,
+      /GET_PEOPLE/,
+      /GET_CONTACTS/,
+      /DIRECTORY/,
     ],
     deny: [
       /DELETE/,

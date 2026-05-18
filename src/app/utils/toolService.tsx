@@ -1,14 +1,16 @@
 import {
-  CalendarIcon,
-  ContactsIcon,
-  DocsIcon,
-  DriveIcon,
-  GenericToolIcon,
-  GitHubIcon,
-  GmailIcon,
-  SheetsIcon,
-  SparklesIcon,
-} from "../components/serviceIcons";
+  Mail,
+  Calendar,
+  FolderClosed,
+  Sheet,
+  FileText,
+  Users,
+  Wrench,
+  Sparkles,
+  Paperclip,
+  Send,
+} from "lucide-react";
+import { GoogleGIcon, GitHubIcon } from "../components/serviceIcons";
 
 export type Service =
   | "gmail"
@@ -18,10 +20,45 @@ export type Service =
   | "docs"
   | "contacts"
   | "github"
+  | "google"
   | "rank"
+  | "attachment"
+  | "send"
   | "generic";
 
-// First-match-wins. Each rule maps a slug pattern to a service + human label.
+const ICON_PROPS = { size: 18, strokeWidth: 1.7, "aria-hidden": true } as const;
+
+export function ServiceIcon({ service }: { service: Service }) {
+  switch (service) {
+    case "gmail":
+      return <Mail {...ICON_PROPS} color="#EA4335" />;
+    case "calendar":
+      return <Calendar {...ICON_PROPS} color="#1A73E8" />;
+    case "drive":
+      return <FolderClosed {...ICON_PROPS} color="#0F9D58" />;
+    case "sheets":
+      return <Sheet {...ICON_PROPS} color="#0F9D58" />;
+    case "docs":
+      return <FileText {...ICON_PROPS} color="#4285F4" />;
+    case "contacts":
+      return <Users {...ICON_PROPS} color="#5F6368" />;
+    case "github":
+      return <GitHubIcon />;
+    case "google":
+      return <GoogleGIcon />;
+    case "rank":
+      return <Sparkles {...ICON_PROPS} color="#7c3aed" />;
+    case "attachment":
+      return <Paperclip {...ICON_PROPS} color="#5F6368" />;
+    case "send":
+      return <Send {...ICON_PROPS} color="#EA4335" />;
+    case "generic":
+    default:
+      return <Wrench {...ICON_PROPS} color="#71717a" />;
+  }
+}
+
+// Tool slug → { service, label }. First rule wins.
 const RULES: Array<[RegExp, Service, string]> = [
   // gmail
   [/FETCH_EMAILS\b/, "gmail", "Fetching emails"],
@@ -31,7 +68,7 @@ const RULES: Array<[RegExp, Service, string]> = [
   [/CREATE_EMAIL_DRAFT|CREATE_DRAFT/, "gmail", "Drafting email"],
   [/FORWARD_MESSAGE/, "gmail", "Forwarding email"],
   [/CREATE_REPLY/, "gmail", "Replying"],
-  // contacts/people
+  // contacts
   [/SEARCH_PEOPLE|GET_PEOPLE|GET_CONTACTS|DIRECTORY/, "contacts", "Searching contacts"],
   // calendar
   [/CREATE_EVENT|EVENT_INSERT/, "calendar", "Creating calendar event"],
@@ -54,6 +91,8 @@ const RULES: Array<[RegExp, Service, string]> = [
   [/GET_AN_ISSUE/, "github", "Reading GitHub issue"],
   [/LIST_PULL_REQUESTS|GET_A_PULL_REQUEST/, "github", "Fetching pull requests"],
   [/^GITHUB_/, "github", "GitHub action"],
+  // fallback: any googlesuper tool we didn't pattern-match
+  [/^GOOGLESUPER_/, "google", "Google action"],
 ];
 
 export function describeTool(slug: string): { service: Service; label: string } {
@@ -70,29 +109,6 @@ function prettify(slug: string): string {
     .toLowerCase()
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-export function ServiceIcon({ service }: { service: Service }) {
-  switch (service) {
-    case "gmail":
-      return <GmailIcon />;
-    case "calendar":
-      return <CalendarIcon />;
-    case "drive":
-      return <DriveIcon />;
-    case "sheets":
-      return <SheetsIcon />;
-    case "docs":
-      return <DocsIcon />;
-    case "contacts":
-      return <ContactsIcon />;
-    case "github":
-      return <GitHubIcon />;
-    case "rank":
-      return <SparklesIcon />;
-    default:
-      return <GenericToolIcon />;
-  }
 }
 
 export function formatBytes(n: number): string {
