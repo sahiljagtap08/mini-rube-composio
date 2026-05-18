@@ -74,6 +74,8 @@ export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
       /STAR_/,
       /UNSTAR_/,
       /NOTIFICATIONS/,
+      /IMPORT/,
+      /WATCH/,
     ],
     readonly: true,
     toolkits: ["googlesuper"],
@@ -196,6 +198,14 @@ const MUTATING_TOKENS = new Set([
   "UPLOAD",
   "APPLY",
   "PUT",
+  "IMPORT",
+  "PATCH",
+  "DUPLICATE",
+  "COPY",
+  "EDIT",
+  "MOVE",
+  "EMPTY",
+  "WATCH",
 ]);
 
 export function isMutating(slug: string): boolean {
