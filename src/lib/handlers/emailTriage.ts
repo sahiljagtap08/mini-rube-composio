@@ -204,8 +204,14 @@ export async function runEmailTriage(
     include_payload: false,
     verbose: false,
   };
-  if (useImportantQuery) args.query = "is:important OR is:starred";
-  else if (slots.gmailQuery) args.query = slots.gmailQuery;
+  if (useImportantQuery) {
+    args.query = "is:important OR is:starred";
+  } else if (slots.gmailQuery && !hasRecencyWindow) {
+    // Only apply slot-derived filters when the user did NOT ask for a
+    // recency window. For "last 100 emails and show important ones" we want
+    // the recent 100 unfiltered, then rank in code.
+    args.query = slots.gmailQuery;
+  }
 
   console.log(
     `[email_triage] requested=${slots.count} max_results=${maxResults} useImportantQuery=${useImportantQuery} args=${JSON.stringify(args)}`,
