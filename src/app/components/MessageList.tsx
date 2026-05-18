@@ -1,15 +1,21 @@
 import { useEffect, useRef } from "react";
 import type { Message as ChatMessage } from "ai";
 import { Message } from "./Message";
-import type { RouteMeta } from "./AgentRunSteps";
+import type { RouteMeta, TriageStats } from "../types";
 
 type Props = {
   messages: ChatMessage[];
   metaByAssistantIndex: Map<number, RouteMeta>;
+  triageByAssistantIndex: Map<number, TriageStats>;
   isStreaming: boolean;
 };
 
-export function MessageList({ messages, metaByAssistantIndex, isStreaming }: Props) {
+export function MessageList({
+  messages,
+  metaByAssistantIndex,
+  triageByAssistantIndex,
+  isStreaming,
+}: Props) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,16 +27,23 @@ export function MessageList({ messages, metaByAssistantIndex, isStreaming }: Pro
     <div className="messages">
       {messages.map((m) => {
         let meta: RouteMeta | undefined;
+        let triage: TriageStats | undefined;
         let streaming = false;
         if (m.role === "assistant") {
           assistantIdx += 1;
           meta = metaByAssistantIndex.get(assistantIdx);
-          // Treat the very last message as streaming while the chat is loading
+          triage = triageByAssistantIndex.get(assistantIdx);
           const isLast = m === messages[messages.length - 1];
           streaming = isStreaming && isLast;
         }
         return (
-          <Message key={m.id} message={m} meta={meta} isStreaming={streaming} />
+          <Message
+            key={m.id}
+            message={m}
+            meta={meta}
+            triage={triage}
+            isStreaming={streaming}
+          />
         );
       })}
       <div ref={endRef} />

@@ -1,5 +1,5 @@
 import { XIcon } from "./icons";
-import { formatBytes } from "../utils/toolLabels";
+import { formatBytes } from "../utils/toolService";
 
 export type Attachment = {
   id: string;

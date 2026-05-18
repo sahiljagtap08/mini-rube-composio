@@ -6,7 +6,7 @@ import { MessageList } from "./components/MessageList";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorStack, type AppError } from "./components/ErrorCard";
 import type { Toolkit } from "./components/ConnectionChips";
-import type { RouteMeta } from "./components/AgentRunSteps";
+import type { RouteMeta, TriageStats } from "./types";
 import type { Attachment } from "./components/AttachmentChips";
 
 type UploadInfo = Attachment;
@@ -75,6 +75,9 @@ export default function App() {
   const [metaByAssistantIndex, setMetaByIdx] = useState<Map<number, RouteMeta>>(
     new Map(),
   );
+  const [triageByAssistantIndex, setTriageByIdx] = useState<
+    Map<number, TriageStats>
+  >(new Map());
 
   useEffect(() => {
     if (!data) return;
@@ -90,6 +93,8 @@ export default function App() {
         });
       } else if (kind === "route") {
         console.log("%c[chat:route]", "color:#0a7;font-weight:600", part);
+      } else if (kind === "triage") {
+        console.log("%c[chat:triage]", "color:#0a7;font-weight:600", part);
       } else if (kind === "finish") {
         console.log("%c[chat:finish]", "color:#888", part);
       } else {
@@ -98,17 +103,24 @@ export default function App() {
     }
     lastSeen.current = data.length;
 
-    // Build assistant-index → meta map: each `kind:"route"` event in `data`
-    // immediately precedes one assistant message.
-    const map = new Map<number, RouteMeta>();
-    let idx = 0;
+    // Build per-assistant-message maps from the data stream. The order in
+    // `data` is: route → [triage] → [finish] per turn. The triage event
+    // belongs to the most recent route.
+    const routeMap = new Map<number, RouteMeta>();
+    const triageMap = new Map<number, TriageStats>();
+    let nextIdx = 0;
+    let currentIdx = -1;
     for (const part of data as any[]) {
       if (part?.kind === "route") {
-        map.set(idx, part as RouteMeta);
-        idx += 1;
+        currentIdx = nextIdx;
+        routeMap.set(currentIdx, part as RouteMeta);
+        nextIdx += 1;
+      } else if (part?.kind === "triage" && currentIdx >= 0) {
+        triageMap.set(currentIdx, part as TriageStats);
       }
     }
-    setMetaByIdx(map);
+    setMetaByIdx(routeMap);
+    setTriageByIdx(triageMap);
   }, [data]);
 
   // Connection state
@@ -239,8 +251,8 @@ export default function App() {
     }
   }, [chatError]);
 
-  // Memoize the meta map (already state, just stabilizes ref for child)
   const metaMap = useMemo(() => metaByAssistantIndex, [metaByAssistantIndex]);
+  const triageMap = useMemo(() => triageByAssistantIndex, [triageByAssistantIndex]);
 
   return (
     <div className="app">
@@ -256,6 +268,7 @@ export default function App() {
             <MessageList
               messages={messages}
               metaByAssistantIndex={metaMap}
+              triageByAssistantIndex={triageMap}
               isStreaming={isLoading}
             />
           ) : (

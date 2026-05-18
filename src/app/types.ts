@@ -10,3 +10,18 @@ export type RouteMeta = {
   model?: string;
   authToolkits?: string[] | null;
 };
+
+export type TriageStats = {
+  kind?: "triage";
+  requestedCount?: number;
+  fetchArgs?: Record<string, unknown>;
+  rawSize?: number;
+  sanitizedSize?: number;
+  fetched?: number;
+  ranked?: number;
+  topCount?: number;
+  finalPayloadSize?: number;
+  tokenGuardApplied?: boolean;
+  durationMs?: number;
+  error?: string;
+};
