@@ -416,6 +416,9 @@ Bun.serve({
         const toolMap: Record<string, any> = {};
         for (const t of tools)
           Object.assign(toolMap, makeAITool(t, decision.intent, turnState));
+        console.log(
+          `[chat] final tools=[${tools.map((t) => t.slug).join(", ") || "(none)"}]`,
+        );
 
         const slugList = tools.map((t) => t.slug).join(", ") || "(none)";
         const today = new Date();
@@ -502,9 +505,11 @@ Routed intent: ${decision.intent} — ${INTENT_PROFILES[decision.intent].descrip
 Available tools for this turn: ${slugList}.
 
 Operating rules:
-- If a required argument is missing (recipient, repo, folder URL, date/time, ID), ASK the user — do not invent placeholder values like "1a2b3c4d5e6f7890", "<id>", "your_id".
-- Real IDs must come from a previous tool result. To act on a message/event/file you must list/search for it first.
+- ACT on safe defaults. Do NOT ask the user to confirm read-only operations. "Read my last 5 emails" needs no confirmation. Bad: "Would you like me to fetch them?" Good: "Fetching your last 5 emails now…" (then proceed and show results).
+- If a required argument is genuinely missing (recipient for send, repo URL for github bulk, folder URL for drive bulk, time for a calendar event), ask. Otherwise pick a safe default and act.
+- Do not invent placeholder values like "1a2b3c4d5e6f7890", "<id>", "your_id". Real IDs must come from a previous tool result; to act on a specific message/event/file you must list/search for it first.
 - If a tool returns {error:...}, surface the error and suggest a concrete fix; do NOT keep retrying the same call with the same args.
+- If the tool only supports a per-call max (e.g. up to 500 results), do NOT tell the user "I can only fetch N". Just fetch the max it supports and slice to what the user asked for.
 - Be concise. A few sentences plus a compact list when relevant.${intentBlock}${attachmentBlock}`;
 
         const sd = new StreamData();

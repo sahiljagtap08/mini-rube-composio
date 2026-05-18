@@ -1,5 +1,5 @@
 import { generateObject, jsonSchema } from "ai";
-import { getCatalog, shortlistTools } from "./catalog";
+import { getCatalog, shortlistTools, getBestEmailReadTools } from "./catalog";
 import { model } from "./ai";
 import {
   filterToolsByIntent,
@@ -200,15 +200,21 @@ export async function route(
   const catalog = await getCatalog();
   const valid = new Set(catalog.map((t) => t.slug));
   const modelSelected = obj.tool_slugs.filter((s) => valid.has(s));
+  console.log(
+    `[router] intent=${obj.intent} model-picked=[${modelSelected.join(", ") || "(none)"}]`,
+  );
 
   // Intent-based filter (the safety layer the user asked for)
   const filtered = filterToolsByIntent(obj.intent, modelSelected);
   let selected = filtered.allowed;
   const blocked = filtered.blocked;
+  if (filtered.blocked.length) {
+    console.log(
+      `[router] filter blocked [${filtered.blocked.map((b) => b.slug).join(", ")}]`,
+    );
+  }
 
-  // Recovery: if the model returned zero usable tools for an action intent,
-  // pull the highest-scoring shortlist tools that pass the filter. Without
-  // this, prompts like "read my last 100 emails" can end up with no tools.
+  // Stage 1 recovery: re-shortlist-filter for action intents.
   const actionIntents = new Set([
     "email_triage",
     "send_email",
@@ -226,9 +232,21 @@ export async function route(
     const top = recovered.allowed.slice(0, 3);
     if (top.length > 0) {
       console.log(
-        `[router] recovery: model returned no tools for intent=${obj.intent}; falling back to top shortlist [${top.join(", ")}]`,
+        `[router] recovery stage-1: model picked nothing → top filtered shortlist [${top.join(", ")}]`,
       );
       selected = top;
+    }
+  }
+
+  // Stage 2 recovery: deterministic email-read backstop. This is what makes
+  // the "last 5 emails" path actually executable when the LLM is unhelpful.
+  if (selected.length === 0 && obj.intent === "email_triage") {
+    const best = (await getBestEmailReadTools()).slice(0, 2);
+    if (best.length > 0) {
+      selected = best.map((t) => t.slug);
+      console.log(
+        `[router] recovery stage-2: injecting deterministic email read tools [${selected.join(", ")}]`,
+      );
     }
   }
 

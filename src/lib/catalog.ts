@@ -255,3 +255,34 @@ export async function getToolsByToolkit(toolkit: string): Promise<ToolMeta[]> {
   await getCatalog();
   return byToolkit.get(toolkit) ?? [];
 }
+
+// Deterministic, LLM-independent picker for read-only Gmail tools. Used as a
+// final safety net when the router LLM returns no usable tools for an email
+// triage prompt.
+const EMAIL_READ_DENY =
+  /(?:^|_)(?:ADD|SEND|DELETE|TRASH|ARCHIVE|MODIFY|UPDATE|DRAFT|REPLY|FORWARD|BATCH|MARK|MOVE|STAR|UNSTAR|LABEL|CREATE|INSERT|PATCH|REMOVE|EMPTY|CLEAR|DUPLICATE|COPY|EDIT|APPLY)(?:_|$)/;
+const EMAIL_NOUNS_RX = /(EMAIL|MESSAGE|THREAD|GMAIL|INBOX|MAIL)/;
+const READ_VERBS_RX = /(FETCH|SEARCH|LIST|\bGET\b|READ|VIEW)/;
+
+export async function getBestEmailReadTools(): Promise<ToolMeta[]> {
+  const cat = await getCatalog();
+  const gs = cat.filter((t) => t.toolkit === "googlesuper");
+  type Scored = { t: ToolMeta; score: number };
+  const scored: Scored[] = [];
+  for (const t of gs) {
+    const up = t.slug.toUpperCase();
+    if (EMAIL_READ_DENY.test(up)) continue;
+    if (!EMAIL_NOUNS_RX.test(up)) continue; // must be email-shaped
+    let score = 0;
+    // strong: combined read-verb + email-noun patterns
+    if (/(FETCH|SEARCH|LIST)_(?:EMAIL|MESSAGE|THREAD)/.test(up)) score += 10;
+    if (/(?:EMAIL|MESSAGE|THREAD)S?_(?:LIST|GET|SEARCH|FETCH)/.test(up)) score += 10;
+    if (READ_VERBS_RX.test(up)) score += 4;
+    if (/FETCH/.test(up)) score += 2; // FETCH is typically the richest read
+    if (/THREAD/.test(up)) score += 1;
+    if (/BY_(?:MESSAGE|THREAD)_ID/.test(up)) score -= 2; // single-item lookups: useful but secondary
+    if (score > 0) scored.push({ t, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((x) => x.t);
+}
