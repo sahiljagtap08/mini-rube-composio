@@ -25,6 +25,10 @@ export type IntentProfile = {
   deny: RegExp[];
   readonly?: boolean;
   noTools?: boolean;
+  // Restrict tool selection to slugs whose toolkit prefix is in this list.
+  // Tool slugs from Composio follow `<TOOLKIT>_*` (uppercased) so we infer
+  // by splitting on the first `_`.
+  toolkits?: string[];
 };
 
 export const INTENT_PROFILES: Record<Intent, IntentProfile> = {
