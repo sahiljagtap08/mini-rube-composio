@@ -50,10 +50,14 @@ export default function App() {
     append,
   } = useChat({
     api: "/api/chat",
-    experimental_prepareRequestBody: ({ messages }) => ({
-      messages,
-      data: { attachments: attachmentsRef.current.map((a) => ({ id: a.id })) },
-    }),
+    experimental_prepareRequestBody: ({ messages }) => {
+      const list = attachmentsRef.current ?? [];
+      console.log(`[attachments] prepare body count=${list.length}`);
+      return {
+        messages,
+        data: { attachments: list.map((a) => ({ id: a.id })) },
+      };
+    },
     onResponse(res) {
       console.log(
         `%c[chat] response ${res.status} ${res.statusText}`,
@@ -261,7 +265,12 @@ export default function App() {
         pushError({ kind: "upload", message: data.error });
         return;
       }
-      setAttachments((cur) => [...cur, data]);
+      setAttachments((cur) => {
+        const next = [...cur, data];
+        attachmentsRef.current = next;
+        console.log(`[attachments] uploaded id=${data.id} count=${next.length}`);
+        return next;
+      });
     } catch (e: any) {
       pushError({ kind: "upload", message: e?.message ?? String(e) });
     } finally {
@@ -269,7 +278,12 @@ export default function App() {
     }
   }
   function onRemoveAttachment(id: string) {
-    setAttachments((cur) => cur.filter((a) => a.id !== id));
+    console.log(`[attachments] manual remove id=${id}`);
+    setAttachments((cur) => {
+      const next = cur.filter((a) => a.id !== id);
+      attachmentsRef.current = next;
+      return next;
+    });
   }
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
