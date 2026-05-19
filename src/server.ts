@@ -695,6 +695,23 @@ Bun.serve({
           );
         }
 
+        // Deterministic guard for send_email with phantom attachment:
+        // user typed "with the attached PDF" / "send this" / "the file"
+        // but no file is actually uploaded in the composer. The model
+        // hallucinates "I see a PDF attached" otherwise.
+        if (
+          decision.intent === "send_email" &&
+          attachments.length === 0 &&
+          /\b(?:attached|attachment|the\s+(?:pdf|file|doc|image))\b/i.test(prompt) &&
+          !/\battach(?:ed)?\s+is\s+below\b/i.test(prompt)
+        ) {
+          console.log("[chat] phantom-attachment clarify (send_email + no upload)");
+          return dataStreamReply(
+            "I don't see any file attached. Click the 📎 paperclip in the composer to upload the file you want to send, then tell me who to send it to.",
+            { ...routerMeta, kind: "clarify", reason: "no_attachment_uploaded" },
+          );
+        }
+
         if (decision.mode === "auth_needed") {
           const tks = decision.authToolkits ?? [];
           return dataStreamReply(
@@ -714,7 +731,30 @@ Bun.serve({
         }
 
         if (decision.mode === "long_job") {
-          const jobType = decision.jobType ?? "unknown";
+          let jobType = decision.jobType ?? "unknown";
+          // Hard correction: the router LLM occasionally swaps these two
+          // (saw it classify "Take all the resumes in this Drive folder"
+          // as github_issues_to_sheet). Override from prompt keywords
+          // when the prompt is unambiguous about which surface it's on.
+          const promptLower = prompt.toLowerCase();
+          const looksDrive = /\b(drive\s+folder|drive\s+file|resume|candidate|folder\s+url|drive\.google\.com\/drive)\b/i.test(
+            promptLower,
+          );
+          const looksGithub = /\b(github|issue|pull\s+request|\bpr\b|repository|repo|owner\/repo|\/composio\b)\b/i.test(
+            promptLower,
+          ) || /\b[a-z0-9][a-z0-9_.-]+\/[a-z0-9][a-z0-9_.-]+\b/i.test(promptLower);
+          if (looksDrive && !looksGithub && jobType !== "drive_files_to_sheet") {
+            console.log(
+              `[router:override] long_job ${jobType} → drive_files_to_sheet (prompt mentions Drive/resume, not GitHub)`,
+            );
+            jobType = "drive_files_to_sheet";
+          } else if (looksGithub && !looksDrive && jobType !== "github_issues_to_sheet") {
+            console.log(
+              `[router:override] long_job ${jobType} → github_issues_to_sheet (prompt mentions GitHub/repo, not Drive)`,
+            );
+            jobType = "github_issues_to_sheet";
+          }
+
           if (jobType !== "github_issues_to_sheet" && jobType !== "drive_files_to_sheet") {
             return dataStreamReply(
               `Detected a long-running workflow but no executor is wired for "${jobType}". Open an issue.`,
