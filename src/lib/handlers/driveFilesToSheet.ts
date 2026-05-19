@@ -16,9 +16,16 @@
 
 import { generateObject, jsonSchema } from "ai";
 import { executeTool } from "../tools";
-import { emit, type Job } from "../jobs";
+import {
+  emit,
+  workflowDone,
+  workflowError,
+  workflowProgress,
+  workflowStep,
+  type Job,
+} from "../jobs";
+import { step } from "../workflow";
 import { model } from "../ai";
-import { describeChain } from "../depGraph";
 
 const CONCURRENCY = 4;
 const SHEET_BATCH_ROWS = 100;

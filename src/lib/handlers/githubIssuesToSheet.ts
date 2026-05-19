@@ -14,8 +14,15 @@
 //   { spreadsheetId, range: "Sheet1!A1", valueInputOption: "RAW", values: [[...]] }
 
 import { executeTool } from "../tools";
-import { emit, type Job } from "../jobs";
-import { describeChain } from "../depGraph";
+import {
+  emit,
+  workflowDone,
+  workflowError,
+  workflowProgress,
+  workflowStep,
+  type Job,
+} from "../jobs";
+import { step } from "../workflow";
 
 const ISSUES_PER_PAGE = 100;
 const SHEET_BATCH_ROWS = 200;
@@ -90,37 +97,42 @@ export async function runGithubIssuesToSheet(
   try {
     const repo = parseRepo(prompt);
     if (!repo) {
-      emit(job, {
-        kind: "error",
-        error: "I couldn't find an owner/repo in your prompt. Try 'composiohq/composio'.",
-      });
+      workflowError(
+        job,
+        "I couldn't find an owner/repo in your prompt. Try 'composiohq/composio'.",
+      );
       return;
     }
     const state = parseState(prompt);
     const countLimit = parseCountLimit(prompt);
-    const chain = [
-      "GITHUB_LIST_REPOSITORY_ISSUES",
-      "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
-      "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
-    ];
+    const STEPS = {
+      FETCH: "fetch_issues",
+      CREATE_SHEET: "create_sheet",
+      WRITE_ROWS: "write_rows",
+    };
     emit(job, {
-      kind: "plan",
-      chain,
-      note: `${repo.owner}/${repo.repo}, state=${state}${countLimit ? `, limit=${countLimit}` : ""}`,
+      kind: "workflow_started",
+      jobId: job.id,
+      title: `Reading GitHub issues from ${repo.owner}/${repo.repo} → Google Sheet`,
+      steps: [
+        step(STEPS.FETCH, "Fetch GitHub issues", "github", {
+          toolSlug: "GITHUB_LIST_REPOSITORY_ISSUES",
+        }),
+        step(STEPS.CREATE_SHEET, "Create Google Sheet", "sheets", {
+          toolSlug: "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
+        }),
+        step(STEPS.WRITE_ROWS, "Write issue rows to Sheet", "sheets", {
+          toolSlug: "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
+        }),
+      ],
     });
-    console.log(
-      `[github→sheet] plan: ${describeChain(chain)} (${repo.owner}/${repo.repo} ${state}${countLimit ? ` limit=${countLimit}` : ""})`,
-    );
+    workflowStep(job, STEPS.FETCH, "active");
 
     // ---- Phase 1: paginate issues ----
     const allIssues: any[] = [];
     let page = 1;
     const targetCount = countLimit ?? Infinity;
     while (page <= MAX_PAGES && allIssues.length < targetCount) {
-      emit(job, {
-        kind: "step",
-        label: `Fetching ${repo.owner}/${repo.repo} issues, page ${page}`,
-      });
       const res: any = await executeTool("GITHUB_LIST_REPOSITORY_ISSUES", userId, {
         owner: repo.owner,
         repo: repo.repo,
@@ -129,10 +141,8 @@ export async function runGithubIssuesToSheet(
         page,
       });
       if (res?.successful === false) {
-        emit(job, {
-          kind: "error",
-          error: `GitHub list failed on page ${page}: ${res.error ?? "unknown"}`,
-        });
+        workflowStep(job, STEPS.FETCH, "error", `page ${page}: ${res.error ?? "unknown"}`);
+        workflowError(job, `GitHub list failed on page ${page}: ${res.error ?? "unknown"}`);
         return;
       }
       const data = res?.data ?? res;
@@ -142,47 +152,51 @@ export async function runGithubIssuesToSheet(
       else if (Array.isArray(data)) pageItems = data;
       else if (Array.isArray(data?.response)) pageItems = data.response;
       if (pageItems.length === 0) break;
-      // GitHub returns PRs as issues with a pull_request field — exclude them
       const onlyIssues = pageItems.filter((i: any) => !i?.pull_request);
       for (const issue of onlyIssues) {
         if (allIssues.length >= targetCount) break;
         allIssues.push(issue);
       }
-      emit(job, {
-        kind: "progress",
-        processed: allIssues.length,
-        total: countLimit,
-        message: `${allIssues.length} issues fetched`,
-      });
+      workflowProgress(
+        job,
+        allIssues.length,
+        countLimit ?? undefined,
+        `Page ${page} · ${allIssues.length} issues fetched`,
+      );
       if (pageItems.length < ISSUES_PER_PAGE) break;
       if (allIssues.length >= targetCount) break;
       page += 1;
     }
-    emit(job, {
-      kind: "step",
-      label: `Fetched ${allIssues.length} issues from ${repo.owner}/${repo.repo}`,
-    });
+    workflowStep(
+      job,
+      STEPS.FETCH,
+      "done",
+      `${allIssues.length} issue${allIssues.length === 1 ? "" : "s"} fetched (PRs excluded)`,
+    );
 
     if (allIssues.length === 0) {
-      emit(job, {
-        kind: "done",
-        result: { issuesCount: 0, note: "No issues matched the filter — nothing to write." },
+      workflowStep(job, STEPS.CREATE_SHEET, "skipped");
+      workflowStep(job, STEPS.WRITE_ROWS, "skipped");
+      workflowDone(job, {
+        summary: "No issues matched the filter — nothing to write.",
+        rowsWritten: 0,
       });
       return;
     }
 
     // ---- Phase 2: create the sheet ----
+    workflowStep(job, STEPS.CREATE_SHEET, "active");
     const sheetTitle = `mini-rube · ${repo.owner}/${repo.repo} issues · ${new Date()
       .toISOString()
       .slice(0, 10)}`;
-    emit(job, { kind: "step", label: `Creating Google Sheet "${sheetTitle}"` });
     const createRes: any = await executeTool(
       "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
       userId,
       { title: sheetTitle },
     );
     if (createRes?.successful === false) {
-      emit(job, { kind: "error", error: `Couldn't create sheet: ${createRes.error}` });
+      workflowStep(job, STEPS.CREATE_SHEET, "error", createRes.error);
+      workflowError(job, `Couldn't create sheet: ${createRes.error}`);
       return;
     }
     const sheetData = createRes?.data ?? createRes ?? {};
@@ -200,67 +214,52 @@ export async function runGithubIssuesToSheet(
         ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`
         : null);
     if (!spreadsheetId) {
-      emit(job, {
-        kind: "error",
-        error: "Sheet was created but the response didn't include a spreadsheet_id.",
-      });
+      workflowStep(job, STEPS.CREATE_SHEET, "error", "no spreadsheet_id in response");
+      workflowError(job, "Sheet was created but the response didn't include a spreadsheet_id.");
       return;
     }
-    emit(job, {
-      kind: "step",
-      label: `Sheet created`,
-      detail: spreadsheetId,
-    });
+    workflowStep(job, STEPS.CREATE_SHEET, "done", sheetTitle);
 
     // ---- Phase 3: append rows in batches ----
     const rows: (string | number)[][] = [HEADERS];
     for (const i of allIssues) rows.push(rowOf(i));
     const total = rows.length;
 
+    workflowStep(job, STEPS.WRITE_ROWS, "active");
     let wroteTotal = 0;
     for (let offset = 0; offset < rows.length; offset += SHEET_BATCH_ROWS) {
       const batch = rows.slice(offset, offset + SHEET_BATCH_ROWS);
-      // SPREADSHEETS_VALUES_APPEND with table-anchored range — Sheets will
-      // find the last row of the logical table at A1 and append after it.
-      const appendArgs = {
-        spreadsheetId,
-        range: "Sheet1!A1",
-        valueInputOption: "RAW",
-        values: batch,
-      };
       const ar: any = await executeTool(
         "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
         userId,
-        appendArgs,
+        {
+          spreadsheetId,
+          range: "Sheet1!A1",
+          valueInputOption: "RAW",
+          values: batch,
+        },
       );
       if (ar?.successful === false) {
-        emit(job, {
-          kind: "error",
-          error: `Sheet append failed at row ${offset}: ${ar.error}`,
-        });
+        workflowStep(job, STEPS.WRITE_ROWS, "error", `row ${offset}: ${ar.error}`);
+        workflowError(job, `Sheet append failed at row ${offset}: ${ar.error}`);
         return;
       }
       wroteTotal += batch.length;
-      emit(job, {
-        kind: "progress",
-        processed: wroteTotal,
-        total,
-        message: `Wrote ${wroteTotal}/${total} rows`,
-      });
+      workflowProgress(job, wroteTotal, total, `Wrote ${wroteTotal}/${total} rows`);
     }
+    workflowStep(job, STEPS.WRITE_ROWS, "done", `${wroteTotal} rows`);
 
-    emit(job, {
-      kind: "done",
-      result: {
-        spreadsheetId,
-        sheetUrl,
-        sheetTitle,
-        issuesCount: allIssues.length,
-        state,
-        repo: `${repo.owner}/${repo.repo}`,
-      },
+    workflowDone(job, {
+      spreadsheetId,
+      sheetUrl: sheetUrl ?? undefined,
+      sheetTitle,
+      issuesCount: allIssues.length,
+      rowsWritten: wroteTotal,
+      state,
+      repo: `${repo.owner}/${repo.repo}`,
+      summary: `Wrote ${allIssues.length} issues to ${sheetTitle}.`,
     });
   } catch (err: any) {
-    emit(job, { kind: "error", error: err?.message ?? String(err) });
+    workflowError(job, err?.message ?? String(err));
   }
 }
