@@ -125,7 +125,7 @@ export async function runDriveFilesToSheet(
       "GOOGLESUPER_LIST_CHILDREN_V2",
       "GOOGLESUPER_DOWNLOAD_FILE",
       "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
-      "GOOGLESUPER_BATCH_UPDATE",
+      "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
     ];
     emit(job, { kind: "plan", chain, note: `folder ${folderId}` });
     console.log(`[drive→sheet] plan: ${describeChain(chain)} folder=${folderId}`);
@@ -253,15 +253,19 @@ export async function runDriveFilesToSheet(
     emit(job, { kind: "step", label: "Sheet created", detail: spreadsheetId });
 
     // ---- Phase 4: append rows in batches ----
+    let wroteTotal = 0;
     for (let offset = 0; offset < rows.length; offset += SHEET_BATCH_ROWS) {
       const batch = rows.slice(offset, offset + SHEET_BATCH_ROWS);
-      const ar: any = await executeTool("GOOGLESUPER_BATCH_UPDATE", userId, {
-        spreadsheet_id: spreadsheetId,
-        spreadsheetId,
-        range: `A${offset + 1}`,
-        values: batch,
-        valueInputOption: "RAW",
-      });
+      const ar: any = await executeTool(
+        "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
+        userId,
+        {
+          spreadsheetId,
+          range: "Sheet1!A1",
+          valueInputOption: "RAW",
+          values: batch,
+        },
+      );
       if (ar?.successful === false) {
         emit(job, {
           kind: "error",
@@ -269,12 +273,12 @@ export async function runDriveFilesToSheet(
         });
         return;
       }
-      const wrote = Math.min(offset + SHEET_BATCH_ROWS, rows.length);
+      wroteTotal += batch.length;
       emit(job, {
         kind: "progress",
-        processed: wrote,
+        processed: wroteTotal,
         total: rows.length,
-        message: `Wrote ${wrote}/${rows.length} rows`,
+        message: `Wrote ${wroteTotal}/${rows.length} rows`,
       });
     }
 

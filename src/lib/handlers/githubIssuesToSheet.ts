@@ -4,9 +4,14 @@
 // is only used to detect intent on the original prompt.
 //
 // Dependency plan (built via depGraph.suggestChain at intent-detection time):
-//   GITHUB_LIST_REPOSITORY_ISSUES  (produces issue_number, row data)
-//   → GOOGLESUPER_CREATE_GOOGLE_SHEET1  (produces spreadsheet_id)
-//   → GOOGLESUPER_BATCH_UPDATE  (consumes spreadsheet_id + rows)
+//   GITHUB_LIST_REPOSITORY_ISSUES               (produces issue_number, row data)
+//   → GOOGLESUPER_CREATE_GOOGLE_SHEET1          (produces spreadsheet_id)
+//   → GOOGLESUPER_SPREADSHEETS_VALUES_APPEND    (consumes spreadsheet_id + rows)
+//
+// Note: we originally targeted GOOGLESUPER_BATCH_UPDATE but Composio marks
+// that tool DEPRECATED in favor of VALUES_APPEND, and the arg shape differs.
+// Schema-probed args we use:
+//   { spreadsheetId, range: "Sheet1!A1", valueInputOption: "RAW", values: [[...]] }
 
 import { executeTool } from "../tools";
 import { emit, type Job } from "../jobs";
@@ -82,7 +87,7 @@ export async function runGithubIssuesToSheet(
     const chain = [
       "GITHUB_LIST_REPOSITORY_ISSUES",
       "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
-      "GOOGLESUPER_BATCH_UPDATE",
+      "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
     ];
     emit(job, {
       kind: "plan",
@@ -191,21 +196,19 @@ export async function runGithubIssuesToSheet(
     for (const i of allIssues) rows.push(rowOf(i));
     const total = rows.length;
 
+    let wroteTotal = 0;
     for (let offset = 0; offset < rows.length; offset += SHEET_BATCH_ROWS) {
       const batch = rows.slice(offset, offset + SHEET_BATCH_ROWS);
-      // Composio's BATCH_UPDATE shape varies — we try the most common
-      // "values+range" shape first. If a deployment uses a different one,
-      // the error surfaces here with a clear cause.
+      // SPREADSHEETS_VALUES_APPEND with table-anchored range — Sheets will
+      // find the last row of the logical table at A1 and append after it.
       const appendArgs = {
-        spreadsheet_id: spreadsheetId,
         spreadsheetId,
-        range: `A${offset + 1}`,
-        values: batch,
+        range: "Sheet1!A1",
         valueInputOption: "RAW",
-        includeValuesInResponse: false,
+        values: batch,
       };
       const ar: any = await executeTool(
-        "GOOGLESUPER_BATCH_UPDATE",
+        "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
         userId,
         appendArgs,
       );
@@ -216,12 +219,12 @@ export async function runGithubIssuesToSheet(
         });
         return;
       }
-      const wrote = Math.min(offset + SHEET_BATCH_ROWS, rows.length);
+      wroteTotal += batch.length;
       emit(job, {
         kind: "progress",
-        processed: wrote,
+        processed: wroteTotal,
         total,
-        message: `Wrote ${wrote}/${total} rows`,
+        message: `Wrote ${wroteTotal}/${total} rows`,
       });
     }
 
