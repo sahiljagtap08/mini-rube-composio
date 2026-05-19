@@ -293,6 +293,48 @@ Bun.serve({
     // Poll-friendly wait endpoint. Waits up to 25s for the link to flip to
     // connected. On timeout returns 200 + {connected:false, pending:true} so
     // the frontend can simply retry without worrying about non-JSON bodies.
+    // Disconnect every active connected account for this user+toolkit.
+    // Composio supports connectedAccounts.delete(id) — we list, filter, and
+    // delete each matching one (a user can occasionally have multiple
+    // stale entries for one toolkit).
+    "/api/disconnect/:toolkit": {
+      async POST(req) {
+        const toolkit = req.params.toolkit;
+        try {
+          const res: any = await composio.connectedAccounts.list({
+            userIds: [USER_ID],
+          });
+          const items: any[] =
+            res?.items ?? res?.data ?? (Array.isArray(res) ? res : []);
+          const matches = items.filter((a) => {
+            const tk = (a?.toolkit?.slug ?? a?.toolkit ?? a?.appName ?? "")
+              .toString()
+              .toLowerCase();
+            return tk === toolkit.toLowerCase();
+          });
+          let deleted = 0;
+          for (const m of matches) {
+            try {
+              await (composio.connectedAccounts as any).delete(m.id);
+              deleted += 1;
+            } catch (err: any) {
+              console.warn(
+                `[disconnect] delete ${m.id} failed: ${err?.message ?? err}`,
+              );
+            }
+          }
+          // Clean up any pending OAuth link too
+          pendingConnections.delete(toolkit);
+          return Response.json({ disconnected: deleted, toolkit });
+        } catch (err: any) {
+          return Response.json(
+            { error: err?.message ?? String(err) },
+            { status: 500 },
+          );
+        }
+      },
+    },
+
     "/api/connect/:toolkit/wait": {
       async POST(req) {
         const toolkit = req.params.toolkit;
@@ -561,8 +603,9 @@ Bun.serve({
           })();
           const friendly =
             jobType === "github_issues_to_sheet"
-              ? `Starting a long job to pull every issue and write it to a Google Sheet. Progress will stream in below.`
-              : `Starting a long job to enumerate the Drive folder and extract candidates into a Google Sheet. Progress will stream in below.`;
+              ? `Starting a job to read GitHub issues and write them to a Google Sheet.`
+              : `Starting a job to read Drive resumes and write them to a Google Sheet.`;
+          console.log(`[job:start] id=${job.id} type=${jobType}`);
           return dataStreamReply(friendly, {
             ...routerMeta,
             kind: "job_started",

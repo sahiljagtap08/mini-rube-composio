@@ -95,6 +95,8 @@ export default function App() {
         console.log("%c[chat:route]", "color:#0a7;font-weight:600", part);
       } else if (kind === "triage") {
         console.log("%c[chat:triage]", "color:#0a7;font-weight:600", part);
+      } else if (kind === "job_started") {
+        console.log("%c[job-ui] started", "color:#0a7;font-weight:600", part);
       } else if (kind === "action_success") {
         console.log("%c[chat:action_success]", "color:#0a7;font-weight:600", part);
         if (part.clearAttachments) setAttachments([]);
@@ -107,15 +109,18 @@ export default function App() {
     lastSeen.current = data.length;
 
     // Build per-assistant-message maps from the data stream. The order in
-    // `data` is: route → [triage] → [finish] per turn. The triage event
-    // belongs to the most recent route.
+    // `data` is: route|job_started → [triage] → [action_success] → [finish]
+    // per turn. `job_started` and `route` both anchor a new assistant turn —
+    // long-job replies use job_started as their primary meta event.
     const routeMap = new Map<number, RouteMeta>();
     const triageMap = new Map<number, TriageStats>();
     let nextIdx = 0;
     let currentIdx = -1;
     for (const part of data as any[]) {
-      if (part?.kind === "route") {
+      if (part?.kind === "route" || part?.kind === "job_started") {
         currentIdx = nextIdx;
+        // Merge job-specific fields (jobId, jobType) into the RouteMeta so
+        // Message can find them.
         routeMap.set(currentIdx, part as RouteMeta);
         nextIdx += 1;
       } else if (part?.kind === "triage" && currentIdx >= 0) {
@@ -152,6 +157,23 @@ export default function App() {
       );
     }
     return res.json() as Promise<T>;
+  }
+
+  async function onDisconnect(toolkit: Toolkit) {
+    try {
+      const r = await fetch(`/api/disconnect/${toolkit}`, { method: "POST" });
+      const data = (await r.json().catch(() => ({}))) as { disconnected?: number; error?: string };
+      if (data.error) {
+        pushError({ kind: "connection", message: `Disconnect failed: ${data.error}` });
+      } else {
+        console.log(`[connect] disconnected ${toolkit} (removed=${data.disconnected ?? 0})`);
+        setConnections((c) => ({ ...c, [toolkit]: false }));
+      }
+    } catch (e: any) {
+      pushError({ kind: "connection", message: `Disconnect error for ${toolkit}: ${e?.message ?? e}` });
+    } finally {
+      refreshConnections();
+    }
   }
 
   async function onConnect(toolkit: Toolkit) {
@@ -287,6 +309,7 @@ export default function App() {
         connections={connections}
         pending={pendingConn}
         onConnect={onConnect}
+        onDisconnect={onDisconnect}
       />
       <main className="app-main">
         <ErrorStack errors={errors} onDismiss={dismissError} />

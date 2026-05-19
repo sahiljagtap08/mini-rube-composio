@@ -121,8 +121,10 @@ export async function runDriveFilesToSheet(
       });
       return;
     }
+    // LIST_CHILDREN_V2 only returns id-only references — we need full
+    // metadata (name, mimeType) so we use FIND_FILE with a folder_id filter.
     const chain = [
-      "GOOGLESUPER_LIST_CHILDREN_V2",
+      "GOOGLESUPER_FIND_FILE",
       "GOOGLESUPER_DOWNLOAD_FILE",
       "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
       "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
@@ -131,17 +133,16 @@ export async function runDriveFilesToSheet(
     console.log(`[drive→sheet] plan: ${describeChain(chain)} folder=${folderId}`);
 
     // ---- Phase 1: list files in folder ----
+    // FIND_FILE returns full metadata (name, mimeType, webViewLink). The
+    // alternative LIST_CHILDREN_V2 only returns id-only references.
     emit(job, { kind: "step", label: `Listing files in Drive folder ${folderId}` });
     let allFiles: any[] = [];
     let pageToken: string | undefined;
     let page = 0;
     while (page < 50) {
-      const res: any = await executeTool("GOOGLESUPER_LIST_CHILDREN_V2", userId, {
+      const res: any = await executeTool("GOOGLESUPER_FIND_FILE", userId, {
         folder_id: folderId,
-        folderId,
-        page_size: 100,
         pageSize: 100,
-        page_token: pageToken,
         pageToken,
       });
       if (res?.successful === false) {
@@ -149,8 +150,7 @@ export async function runDriveFilesToSheet(
         return;
       }
       const data = res?.data ?? res;
-      const files =
-        data?.files ?? data?.children ?? data?.items ?? (Array.isArray(data) ? data : []);
+      const files = data?.files ?? data?.items ?? (Array.isArray(data) ? data : []);
       if (!Array.isArray(files)) break;
       allFiles.push(...files);
       pageToken = data?.nextPageToken ?? data?.next_page_token;

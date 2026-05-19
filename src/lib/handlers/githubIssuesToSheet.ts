@@ -41,6 +41,19 @@ function parseRepo(prompt: string): { owner: string; repo: string } | null {
   return { owner: m[1]!, repo: m[2]! };
 }
 
+function parseCountLimit(prompt: string): number | null {
+  // "last 10 open issues", "first 50 issues", "top 25 issues"
+  const m =
+    /(?:last|latest|first|top|recent)\s+(\d{1,4})\s+(?:open\s+|closed\s+)?(?:issues?|prs?|pull\s+requests?)/i.exec(
+      prompt,
+    );
+  if (m && m[1]) {
+    const n = parseInt(m[1], 10);
+    if (!Number.isNaN(n) && n > 0) return n;
+  }
+  return null;
+}
+
 function parseState(prompt: string): "open" | "closed" | "all" {
   const lower = prompt.toLowerCase();
   if (/\bopen\s+and\s+closed|all\s+issues|every\s+issue|both/.test(lower)) return "all";
@@ -84,6 +97,7 @@ export async function runGithubIssuesToSheet(
       return;
     }
     const state = parseState(prompt);
+    const countLimit = parseCountLimit(prompt);
     const chain = [
       "GITHUB_LIST_REPOSITORY_ISSUES",
       "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
@@ -92,14 +106,17 @@ export async function runGithubIssuesToSheet(
     emit(job, {
       kind: "plan",
       chain,
-      note: `${repo.owner}/${repo.repo}, state=${state}`,
+      note: `${repo.owner}/${repo.repo}, state=${state}${countLimit ? `, limit=${countLimit}` : ""}`,
     });
-    console.log(`[github→sheet] plan: ${describeChain(chain)} (${repo.owner}/${repo.repo} ${state})`);
+    console.log(
+      `[github→sheet] plan: ${describeChain(chain)} (${repo.owner}/${repo.repo} ${state}${countLimit ? ` limit=${countLimit}` : ""})`,
+    );
 
     // ---- Phase 1: paginate issues ----
     const allIssues: any[] = [];
     let page = 1;
-    while (page <= MAX_PAGES) {
+    const targetCount = countLimit ?? Infinity;
+    while (page <= MAX_PAGES && allIssues.length < targetCount) {
       emit(job, {
         kind: "step",
         label: `Fetching ${repo.owner}/${repo.repo} issues, page ${page}`,
@@ -127,14 +144,18 @@ export async function runGithubIssuesToSheet(
       if (pageItems.length === 0) break;
       // GitHub returns PRs as issues with a pull_request field — exclude them
       const onlyIssues = pageItems.filter((i: any) => !i?.pull_request);
-      allIssues.push(...onlyIssues);
+      for (const issue of onlyIssues) {
+        if (allIssues.length >= targetCount) break;
+        allIssues.push(issue);
+      }
       emit(job, {
         kind: "progress",
         processed: allIssues.length,
-        total: null,
+        total: countLimit,
         message: `${allIssues.length} issues fetched`,
       });
       if (pageItems.length < ISSUES_PER_PAGE) break;
+      if (allIssues.length >= targetCount) break;
       page += 1;
     }
     emit(job, {

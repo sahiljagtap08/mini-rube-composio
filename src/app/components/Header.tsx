@@ -4,9 +4,10 @@ type Props = {
   connections: Record<string, boolean>;
   pending: Record<string, boolean>;
   onConnect: (tk: Toolkit) => void;
+  onDisconnect: (tk: Toolkit) => void;
 };
 
-export function Header({ connections, pending, onConnect }: Props) {
+export function Header({ connections, pending, onConnect, onDisconnect }: Props) {
   return (
     <header className="app-header">
       <div className="app-brand">
@@ -17,6 +18,7 @@ export function Header({ connections, pending, onConnect }: Props) {
         connections={connections}
         pending={pending}
         onConnect={onConnect}
+        onDisconnect={onDisconnect}
       />
     </header>
   );
