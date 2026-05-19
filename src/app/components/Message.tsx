@@ -26,6 +26,7 @@ export function Message({ message, meta, triage, isStreaming }: Props) {
   const hasContent = !!message.content;
   const hasActivity = toolInvocations.length > 0 || meta?.intent === "email_triage";
   const jobId = (meta as any)?.jobId as string | undefined;
+  const jobType = (meta as any)?.jobType as string | undefined;
 
   return (
     <div className="msg-row msg-row-assistant">
@@ -56,7 +57,7 @@ export function Message({ message, meta, triage, isStreaming }: Props) {
             </div>
           )
         )}
-        {jobId && <JobCard jobId={jobId} />}
+        {jobId && <JobCard jobId={jobId} jobType={jobType} />}
       </div>
     </div>
   );

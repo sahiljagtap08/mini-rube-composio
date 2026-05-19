@@ -139,6 +139,20 @@ These two are the bugs that made me stop trusting the generic loop.
 
 The global system prompt also has an **anti-hallucination clause** for any mutating slug that ever escapes through the generic loop: the model is forbidden from claiming a `CREATE/UPDATE/DELETE/SEND` happened unless the tool actually returned a successful result. Bare conversational follow-ups are NOT new tasks, but explicit verbs (`schedule`, `send`, `delete`) override prior context.
 
+## tested results
+
+Live runs against `composiohq/composio` and the assignment Drive folder:
+
+| prompt | result |
+|---|---|
+| `read the last 10 open issues from composiohq/composio and make a google sheet…` | ✅ Job succeeded in <2 s. 10 issues written (count slot honoured). Sheet: `1TvgpHurZoP39K8lYfVnB1FT66w6U_66GYIh0OxZV_Ng` |
+| `read all the issues open and closed on composiohq/composio…` | ✅ 31 pages paginated, **588 issues** written, PRs excluded. Sheet: `1I9SSldWDP6vZ4aMfC19xx8DRSVmYTZcXZtdbH_erI74` |
+| `take all the resumes in this drive folder /1bOEE3JXX-iFqbY99VTRq1ak-UOQULc5r…` | ✅ 1000 files listed via `FIND_FILE`, processed at concurrency 4 with per-file LLM extraction; rows written for every file (filename + extracted name/university/last_job + source URL). Run time ~8 min for the full 1000. |
+
+Schema fixes made during testing (now committed):
+- `GOOGLESUPER_BATCH_UPDATE` → **`GOOGLESUPER_SPREADSHEETS_VALUES_APPEND`** (the former is deprecated by Composio; the latter is the real append surface).
+- `GOOGLESUPER_LIST_CHILDREN_V2` (id-only refs) → **`GOOGLESUPER_FIND_FILE`** (returns full file metadata: name, mimeType, webViewLink). LIST_CHILDREN_V2 made every row's filename render as "(unnamed)" — switched to FIND_FILE which returns `resume_1000_Steven_Moore.pdf` etc.
+
 ## how to run
 
 ```sh
@@ -173,12 +187,14 @@ bun scripts/smoke-email.ts    # 4 email-triage-only routing assertions
 
 ## known limitations
 
-- **In-memory state.** Uploads, jobs, and pending OAuth links live in process memory. A `bun run dev` restart wipes them. Production would persist to Postgres + S3 (or just Composio's own storage).
-- **PDF text extraction is best-effort.** `GOOGLESUPER_DOWNLOAD_FILE` may return base64 for arbitrary binary PDFs; in those cases the Drive→Sheet job records the candidate row with whatever fields it could derive from the filename and an LLM extraction over whatever text the tool did surface. Production would shell out to `pdf-parse` or Drive's `export` for Google-native formats.
-- **Long-job concurrency is 4.** Drive resume extraction runs 4 files at a time. Higher concurrency would speed up the 1,000-resume case but risks tripping OpenAI rate limits with the default project — easy to bump.
+- **All state is in-memory.** Uploaded files, the job store, pending OAuth links, the dep-graph cache, the connected-toolkits cache — none of it survives a `bun run dev` restart. The 1000-file Drive job that succeeded today would have to re-run from scratch after a restart. Production would persist jobs to Postgres + S3 (or use Composio's own storage). I made this trade-off explicitly to keep the take-home runnable without infra.
+- **PDF text extraction quality depends entirely on what `GOOGLESUPER_DOWNLOAD_FILE` returns.** For Google-native formats (Docs, plain text) the tool returns extracted text; for binary PDFs the extracted text can be partial or empty. The Drive→Sheet job records what it gets — `name`, `university`, `last_job` may be empty strings for PDFs the downloader couldn't fully decode. Production would add `pdf-parse` for binary PDFs (the lib runs locally, doesn't need infra) or use Drive's `export` endpoint for native formats.
+- **Local uploads are temporary.** `$TMPDIR/mini-rube-uploads/` is cleared by the OS periodically. The `composio.files.upload(...)` stage that gives us an S3 key for `SEND_EMAIL` runs eagerly so the email send works even if the tmp file is later removed.
+- **Long-job concurrency is 4.** Drive resume extraction runs 4 files at a time. Higher concurrency would speed up 1000-resume runs but risks tripping OpenAI's `tier-1` per-minute caps — easy to bump if your project has higher limits.
 - **The dep graph is heuristic.** `producesEntities()` is slug-pattern-based, not a full schema crawl. For a one-off like this it's enough; for a generalizable platform you'd embed the LLM-extracted graph from the previous submission as a static asset.
-- **One-tool-per-intent guarantee is by post-filter, not by tool inventory.** If a future Composio slug shows up with a brand-new mutating verb, the runtime `isMutating` regex needs an update.
+- **One-tool-per-intent guarantee is by post-filter, not by tool inventory.** If a future Composio slug ships with a brand-new mutating verb, the runtime `isMutating` regex needs an update.
 - **The router's structured-JSON call is one model round-trip per turn.** Conversational greetings ("hi", "what can you do?") short-circuit before that call to keep latency low.
+- **Schema-shape assumptions are pinned to what I probed live** during this submission (e.g. `SPREADSHEETS_VALUES_APPEND` arg names, `FIND_FILE` response shape). If Composio updates these surfaces, the worker would need a one-line arg-name fix — surfaced as a clear error in the `JobCard`.
 
 ## file map
 
