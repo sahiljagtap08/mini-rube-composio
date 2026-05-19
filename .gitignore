@@ -33,6 +33,9 @@ agent-sessions/
 *.swo
 .history/
 
+# scratch / prompt-spec files (not part of the project)
+claude-readme.md
+
 # OS
 .DS_Store
 Thumbs.db

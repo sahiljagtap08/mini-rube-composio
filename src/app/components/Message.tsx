@@ -2,6 +2,7 @@ import type { Message as ChatMessage } from "ai";
 import ReactMarkdown from "react-markdown";
 import type { RouteMeta, TriageStats } from "../types";
 import { RunPanel } from "./RunPanel";
+import { JobCard } from "./JobCard";
 
 type Props = {
   message: ChatMessage;
@@ -24,6 +25,7 @@ export function Message({ message, meta, triage, isStreaming }: Props) {
   const toolInvocations = (message as any).toolInvocations ?? [];
   const hasContent = !!message.content;
   const hasActivity = toolInvocations.length > 0 || meta?.intent === "email_triage";
+  const jobId = (meta as any)?.jobId as string | undefined;
 
   return (
     <div className="msg-row msg-row-assistant">
@@ -48,12 +50,13 @@ export function Message({ message, meta, triage, isStreaming }: Props) {
             </ReactMarkdown>
           </div>
         ) : (
-          isStreaming && !hasActivity && (
+          isStreaming && !hasActivity && !jobId && (
             <div className="msg-thinking" aria-label="Thinking">
               <span /><span /><span />
             </div>
           )
         )}
+        {jobId && <JobCard jobId={jobId} />}
       </div>
     </div>
   );

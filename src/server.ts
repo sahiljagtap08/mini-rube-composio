@@ -25,6 +25,9 @@ import {
   runCalendarSchedule,
   formatEventSuccess,
 } from "./lib/handlers/calendarSchedule";
+import { runGithubIssuesToSheet } from "./lib/handlers/githubIssuesToSheet";
+import { runDriveFilesToSheet } from "./lib/handlers/driveFilesToSheet";
+import { createJob, getJob, snapshot, subscribe } from "./lib/jobs";
 
 const USER_ID = "candidate";
 
@@ -336,6 +339,58 @@ Bun.serve({
       },
     },
 
+    "/api/jobs/:id": {
+      async GET(req) {
+        const job = getJob(req.params.id);
+        if (!job) return Response.json({ error: "not found" }, { status: 404 });
+        return Response.json(snapshot(job));
+      },
+    },
+
+    "/api/jobs/:id/events": {
+      async GET(req) {
+        const job = getJob(req.params.id);
+        if (!job) return Response.json({ error: "not found" }, { status: 404 });
+        const enc = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            // replay any events already logged so a late-arriving subscriber
+            // sees the full timeline
+            for (const e of job.log) {
+              controller.enqueue(
+                enc.encode(`data: ${JSON.stringify(e.event)}\n\n`),
+              );
+            }
+            if (job.status === "succeeded" || job.status === "failed") {
+              controller.close();
+              return;
+            }
+            const unsub = subscribe(job, (event) => {
+              try {
+                controller.enqueue(
+                  enc.encode(`data: ${JSON.stringify(event)}\n\n`),
+                );
+                if (event.kind === "done" || event.kind === "error") {
+                  unsub();
+                  controller.close();
+                }
+              } catch {
+                unsub();
+              }
+            });
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+          },
+        });
+      },
+    },
+
     "/api/connections": {
       async GET() {
         const set = await getConnectedToolkits(USER_ID);
@@ -487,14 +542,33 @@ Bun.serve({
         }
 
         if (decision.mode === "long_job") {
-          return dataStreamReply(
-            `Detected a long-running workflow (${decision.jobType ?? "unknown"}).\nReason: ${
-              decision.reason
-            }\nSelected tools: ${
-              decision.selectedToolSlugs.join(", ") || "(none yet)"
-            }\n\nThe deterministic long-job executor will be wired in the next phase.`,
-            routerMeta,
-          );
+          const jobType = decision.jobType ?? "unknown";
+          if (jobType !== "github_issues_to_sheet" && jobType !== "drive_files_to_sheet") {
+            return dataStreamReply(
+              `Detected a long-running workflow but no executor is wired for "${jobType}". Open an issue.`,
+              { ...routerMeta, kind: "error", stage: "long_job", error: "unknown jobType" },
+            );
+          }
+          const job = createJob(jobType, prompt);
+          // fire-and-forget worker — runs in the same Bun process; the
+          // client polls /api/jobs/:id to render progress.
+          (async () => {
+            if (jobType === "github_issues_to_sheet") {
+              await runGithubIssuesToSheet(job, USER_ID, prompt);
+            } else {
+              await runDriveFilesToSheet(job, USER_ID, prompt);
+            }
+          })();
+          const friendly =
+            jobType === "github_issues_to_sheet"
+              ? `Starting a long job to pull every issue and write it to a Google Sheet. Progress will stream in below.`
+              : `Starting a long job to enumerate the Drive folder and extract candidates into a Google Sheet. Progress will stream in below.`;
+          return dataStreamReply(friendly, {
+            ...routerMeta,
+            kind: "job_started",
+            jobId: job.id,
+            jobType,
+          });
         }
 
         // --- deterministic email_triage path ---
