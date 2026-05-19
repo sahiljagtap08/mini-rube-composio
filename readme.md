@@ -76,11 +76,12 @@ sequenceDiagram
   F->>F: inject deterministic recovery if needed
   F-->>E: minimal tool set
   E->>C: SEND_EMAIL(args)
-  Note over C: server wrapper auto-stages uploaded<br/>file via composio.files.upload and<br/>rewrites attachment to {name, mimetype, s3key}
+  Note over C: server wrapper auto-stages the uploaded file via composio.files.upload<br>and rewrites attachment to {name, mimetype, s3key}
   C->>A: Gmail send
   A-->>C: 200 + messageId
   C-->>E: result
-  E-->>U: confirmation grounded in real result;<br/>frontend clears the attachment chip<br/>on kind:"action_success" event
+  E-->>U: confirmation grounded in real result
+  E-->>U: frontend clears the attachment chip on kind action_success
 ```
 
 ### long-job turn (deterministic)
