@@ -15,6 +15,7 @@ export type ParsedSlots = {
   attendeeNames: string[]; // names not yet resolved to an email
   needsTime: boolean;
   wantedAttendee: boolean;
+  wantsMeet: boolean;
   rawTimeMention: string | null;
 };
 
@@ -41,22 +42,16 @@ function clampMin(m: number | undefined): number {
 }
 
 export function parseEventSlots(prompt: string, now: Date = new Date()): ParsedSlots {
-  // Duration
-  let durationMinutes = 30;
-  const dm = DURATION_RX.exec(prompt);
-  if (dm) {
-    const n = parseInt(dm[1]!, 10);
-    if (!Number.isNaN(n)) {
-      durationMinutes = /hour|hr/i.test(dm[2]!) ? n * 60 : n;
-    }
-  }
-
-  // Emails
+  // Emails (parse first — used by the title-match exclusion later)
   const emails = Array.from(prompt.match(EMAIL_RX) ?? []);
 
-  // Start time — try strategies in priority order. First hit wins.
+  // CRITICAL ORDER: parse relative start ("in 5 mins") BEFORE duration.
+  // Otherwise the duration regex eats "5 minutes" from "in 5 minutes" and
+  // we never see the start cue. We mask the matched substring before
+  // duration parsing so the same number doesn't get reused.
   let start: Date | null = null;
   let rawTimeMention: string | null = null;
+  let promptForDuration = prompt;
 
   const inRel = IN_REL_RX.exec(prompt);
   if (inRel) {
@@ -69,6 +64,19 @@ export function parseEventSlots(prompt: string, now: Date = new Date()): ParsedS
     if (ms > 0) {
       start = new Date(now.getTime() + ms);
       rawTimeMention = inRel[0];
+      // mask the "in N <unit>" substring so duration parsing ignores it
+      promptForDuration = prompt.replace(inRel[0], " ".repeat(inRel[0].length));
+    }
+  }
+
+  // Duration — default 30 min if not specified. Parsed from the masked
+  // prompt so "in 5 mins" can't be mistakenly read as duration=5.
+  let durationMinutes = 30;
+  const dm = DURATION_RX.exec(promptForDuration);
+  if (dm) {
+    const n = parseInt(dm[1]!, 10);
+    if (!Number.isNaN(n) && n > 0) {
+      durationMinutes = /hour|hr/i.test(dm[2]!) ? n * 60 : n;
     }
   }
 
@@ -157,6 +165,11 @@ export function parseEventSlots(prompt: string, now: Date = new Date()): ParsedS
   const wantedAttendee =
     /\bwith\s+/i.test(prompt) || emails.length > 0 || attendeeNames.length > 0;
 
+  const wantsMeet =
+    /\b(?:google\s+meet|meet\s+meeting|meet\s+link|video\s+call|video\s+meeting|videoconference|conference\s+call|hangout|with\s+meet)\b/i.test(
+      prompt,
+    );
+
   return {
     title,
     start,
@@ -165,6 +178,7 @@ export function parseEventSlots(prompt: string, now: Date = new Date()): ParsedS
     attendeeNames,
     needsTime: !start,
     wantedAttendee,
+    wantsMeet,
     rawTimeMention,
   };
 }
@@ -220,6 +234,7 @@ export type CalendarOutcome =
       end: Date;
       attendees: string[];
       toolResult: any;
+      eventId?: string;
       eventLink?: string;
       meetLink?: string;
     };
@@ -271,6 +286,7 @@ export async function runCalendarSchedule(
     ),
     needsTime: !(primary.start ?? combined.start),
     wantedAttendee: primary.wantedAttendee || combined.wantedAttendee,
+    wantsMeet: primary.wantsMeet || combined.wantsMeet,
     rawTimeMention: primary.rawTimeMention ?? combined.rawTimeMention,
   };
 
@@ -354,15 +370,25 @@ export async function runCalendarSchedule(
   // 4. Build args and call the tool
   const start = slots.start!;
   const end = new Date(start.getTime() + slots.durationMinutes * 60_000);
-  const args = {
+  // Schema notes: event_duration_minutes is 0-59 ONLY. For ≥ 1h use
+  // event_duration_hour. We always pass end_datetime which takes precedence
+  // anyway, so duration fields are just defensive.
+  const durHours = Math.floor(slots.durationMinutes / 60);
+  const durMinutes = slots.durationMinutes % 60;
+  const args: Record<string, unknown> = {
     summary: slots.title,
     start_datetime: start.toISOString(),
     end_datetime: end.toISOString(),
-    event_duration_minutes: slots.durationMinutes,
+    event_duration_hour: durHours,
+    event_duration_minutes: durMinutes,
     attendees: slots.attendeesEmails,
     timezone: tz,
     description: "Created by mini-rube",
     calendar_id: "primary",
+    // Always create a Google Meet room when the user asked for one. The
+    // Composio param defaults to true; we pass it explicitly so the
+    // intent is unambiguous in the request.
+    create_meeting_room: slots.wantsMeet,
   };
   console.log(`[calendar] calling ${CREATE_EVENT_SLUG} args=${JSON.stringify(args)}`);
 
@@ -390,19 +416,38 @@ export async function runCalendarSchedule(
     };
   }
 
-  // 5. Extract verified info from the actual tool result
-  const data = result?.data ?? result ?? {};
+  // 5. Extract verified info from the actual tool result. Composio's
+  // CREATE_EVENT wraps the real Google Calendar payload under
+  // `data.response_data` — htmlLink, hangoutLink, conferenceData all live
+  // there. We probe both the wrapped path and a handful of fallbacks so
+  // the handler keeps working if Composio reshapes the response.
+  const raw = result?.data ?? result ?? {};
+  const data = raw?.response_data ?? raw;
+  const eventId =
+    data?.id ?? data?.eventId ?? data?.event_id ?? data?.event?.id ?? undefined;
   const eventLink =
-    data?.htmlLink ?? data?.event_link ?? data?.eventLink ?? data?.url ?? undefined;
+    data?.htmlLink ??
+    data?.html_link ??
+    data?.event_link ??
+    data?.eventLink ??
+    data?.url ??
+    raw?.display_url ??
+    data?.event?.htmlLink ??
+    undefined;
   const meetLink =
     data?.hangoutLink ??
+    data?.hangout_link ??
     data?.meet_link ??
     data?.meetLink ??
+    data?.conferenceData?.entryPoints?.find(
+      (e: any) => e?.entryPointType === "video" || e?.uri?.includes("meet.google.com"),
+    )?.uri ??
     data?.conferenceData?.entryPoints?.[0]?.uri ??
+    data?.event?.hangoutLink ??
     undefined;
 
   console.log(
-    `[calendar] success — eventLink=${eventLink ?? "(none)"} meetLink=${meetLink ?? "(none)"}`,
+    `[calendar] success — eventId=${eventId ?? "(none)"} eventLink=${eventLink ?? "(none)"} meetLink=${meetLink ?? "(none)"}`,
   );
 
   return {
@@ -412,12 +457,16 @@ export async function runCalendarSchedule(
     end,
     attendees: slots.attendeesEmails,
     toolResult: data,
+    eventId,
     eventLink,
     meetLink,
   };
 }
 
-export function formatEventSuccess(outcome: Extract<CalendarOutcome, { status: "success" }>, tz: string): string {
+export function formatEventSuccess(
+  outcome: Extract<CalendarOutcome, { status: "success" }>,
+  tz: string,
+): string {
   const startStr = outcome.start.toLocaleString("en-US", {
     weekday: "short",
     month: "short",
@@ -441,6 +490,14 @@ export function formatEventSuccess(outcome: Extract<CalendarOutcome, { status: "
   }
   if (outcome.eventLink) {
     lines.push(`[Open in Calendar](${outcome.eventLink})`);
+  }
+  // Only mention Meet when the tool actually returned one. If the user
+  // asked for Meet but the response didn't include a link, say so
+  // honestly — don't fabricate.
+  if (!outcome.meetLink && outcome.slots.wantsMeet) {
+    lines.push(
+      `_Note: I requested a Google Meet room but the Calendar response didn't include a Meet link in its payload. The event itself was created — open it in Calendar to confirm._`,
+    );
   }
   if (outcome.meetLink) {
     lines.push(`[Google Meet](${outcome.meetLink})`);

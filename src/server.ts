@@ -555,6 +555,43 @@ Bun.serve({
         const connected = await getConnectedToolkits(USER_ID);
         console.log(`[chat] connected=${[...connected].join(",") || "(none)"}`);
 
+        // --- deterministic meet-link / event-link follow-up ---
+        // After a calendar event is created, the user often asks "what's
+        // the meet link?" / "send me the meet link" / "where's the event?".
+        // We answer from the stored SessionTask result. Never re-create the
+        // event. Never claim we emailed anyone unless they explicitly ask.
+        const LINK_FOLLOWUP_RX =
+          /\b(meet\s+link|google\s+meet\s+link|video\s+(?:call\s+)?link|event\s+link|calendar\s+link|where(?:'s| is)\s+the\s+(?:meet|event|link)|send\s+(?:me\s+)?(?:the\s+)?(?:meet|event|link)|did\s+you\s+(?:create|schedule|make)\s+(?:it|the\s+event))\b/i;
+        if (LINK_FOLLOWUP_RX.test(prompt)) {
+          const active = getActiveTask(USER_ID);
+          if (
+            active &&
+            active.intent === "calendar_schedule" &&
+            active.status === "succeeded"
+          ) {
+            const r = (active.result ?? {}) as any;
+            const meetLink = r.meetLink;
+            const eventLink = r.eventLink;
+            let msg: string;
+            if (meetLink) {
+              msg = `Here is the Google Meet link: ${meetLink}`;
+            } else if (eventLink) {
+              msg = `I created the calendar event, but the Calendar response didn't include a Google Meet link. You can open the event here and add Meet from the Calendar UI: ${eventLink}`;
+            } else {
+              msg = `I created the calendar event but the tool result didn't include a link. ${r.summary ?? ""}`;
+            }
+            console.log(`[chat] link follow-up answered from SessionTask ${active.id}`);
+            return dataStreamReply(msg, {
+              kind: "link_followup",
+              taskId: active.id,
+              meetLink: meetLink ?? null,
+              eventLink: eventLink ?? null,
+              provider: PROVIDER,
+              model: MODEL_ID,
+            });
+          }
+        }
+
         // --- deterministic status follow-up ---
         // If the user is asking about the status of a recent long job
         // ("is it done?", "what's the status?", "did it finish?") and we
@@ -899,14 +936,28 @@ Rules:
               error: outcome.message,
             });
           }
-          // success — answer is built from the verified tool result only
+          // success — answer is built from the verified tool result only.
+          // Store every verified field in the SessionTask so follow-up
+          // questions ("what's the meet link?", "where's the event?") can
+          // be answered deterministically without re-calling the model.
           upsertTask(USER_ID, {
             intent: "calendar_schedule",
             status: "succeeded",
-            slots: { start: outcome.start.toISOString(), attendees: outcome.attendees },
+            slots: {
+              title: outcome.slots.title,
+              start: outcome.start.toISOString(),
+              end: outcome.end.toISOString(),
+              attendees: outcome.attendees,
+              wantsMeet: outcome.slots.wantsMeet,
+            },
             result: {
               summary: `Scheduled ${outcome.slots.title}`,
+              eventId: outcome.eventId ?? undefined,
               eventLink: outcome.eventLink ?? undefined,
+              meetLink: outcome.meetLink ?? undefined,
+              start: outcome.start.toISOString(),
+              end: outcome.end.toISOString(),
+              attendees: outcome.attendees,
             },
           });
           const reply = formatEventSuccess(outcome, tz);
