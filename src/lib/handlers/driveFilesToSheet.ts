@@ -261,6 +261,7 @@ export async function runDriveFilesToSheet(
     workflowStep(job, STEPS.CREATE_SHEET, "done", sheetTitle);
 
     // ---- Phase 4: append rows in batches ----
+    workflowStep(job, STEPS.WRITE_ROWS, "active");
     let wroteTotal = 0;
     for (let offset = 0; offset < rows.length; offset += SHEET_BATCH_ROWS) {
       const batch = rows.slice(offset, offset + SHEET_BATCH_ROWS);
@@ -275,33 +276,25 @@ export async function runDriveFilesToSheet(
         },
       );
       if (ar?.successful === false) {
-        emit(job, {
-          kind: "error",
-          error: `Sheet append failed at row ${offset}: ${ar.error}`,
-        });
+        workflowStep(job, STEPS.WRITE_ROWS, "error", `row ${offset}: ${ar.error}`);
+        workflowError(job, `Sheet append failed at row ${offset}: ${ar.error}`);
         return;
       }
       wroteTotal += batch.length;
-      emit(job, {
-        kind: "progress",
-        processed: wroteTotal,
-        total: rows.length,
-        message: `Wrote ${wroteTotal}/${rows.length} rows`,
-      });
+      workflowProgress(job, wroteTotal, rows.length, `Wrote ${wroteTotal}/${rows.length} rows`);
     }
+    workflowStep(job, STEPS.WRITE_ROWS, "done", `${wroteTotal} rows`);
 
-    emit(job, {
-      kind: "done",
-      result: {
-        spreadsheetId,
-        sheetUrl,
-        sheetTitle,
-        filesCount: allFiles.length,
-        rowsWritten: rows.length - 1,
-        folderId,
-      },
+    workflowDone(job, {
+      spreadsheetId,
+      sheetUrl: sheetUrl ?? undefined,
+      sheetTitle,
+      filesCount: allFiles.length,
+      rowsWritten: rows.length - 1,
+      folderId,
+      summary: `Extracted ${outcomes.length} resumes into ${sheetTitle}.`,
     });
   } catch (err: any) {
-    emit(job, { kind: "error", error: err?.message ?? String(err) });
+    workflowError(job, err?.message ?? String(err));
   }
 }
