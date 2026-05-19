@@ -28,6 +28,13 @@ import {
 import { runGithubIssuesToSheet } from "./lib/handlers/githubIssuesToSheet";
 import { runDriveFilesToSheet } from "./lib/handlers/driveFilesToSheet";
 import { createJob, getJob, listJobs, snapshot, subscribe } from "./lib/jobs";
+import {
+  upsertTask,
+  getActiveTask,
+  clearTask,
+  summarizeTaskStatus,
+  extractGenericSlots,
+} from "./lib/sessionTasks";
 
 const USER_ID = "candidate";
 
@@ -149,6 +156,15 @@ function makeAITool(meta: ToolMeta, intent: Intent, turn: TurnState) {
               slug: meta.slug,
               clearAttachments: true,
             } as any);
+            // Mark any active send_email SessionTask as succeeded so status
+            // questions answer deterministically.
+            const active = getActiveTask(USER_ID);
+            if (active?.intent === "send_email") {
+              upsertTask(USER_ID, {
+                status: "succeeded",
+                result: { summary: "Email sent." },
+              });
+            }
           }
           return result;
         } catch (err: any) {
@@ -547,6 +563,23 @@ Bun.serve({
         const STATUS_RX =
           /^(?:is it (?:done|finished|ready)\??|are we done\??|did it (?:finish|complete)\??|what(?:'s| is) the (?:status|progress)\??|status\??|how(?:'s| is) it going\??|progress\??|done\??|finished\??)$/i;
         if (STATUS_RX.test(prompt.trim())) {
+          // First check the active SessionTask — covers both job-backed
+          // tasks (drive/github → sheet) and short tasks (send_email,
+          // calendar_schedule) once they record their final state.
+          const active = getActiveTask(USER_ID);
+          if (active) {
+            const msg = summarizeTaskStatus(active);
+            console.log(`[chat] status follow-up answered from SessionTask ${active.id} (${active.status})`);
+            return dataStreamReply(msg, {
+              kind: "status_followup",
+              taskId: active.id,
+              taskIntent: active.intent,
+              taskStatus: active.status,
+              jobId: active.jobId,
+              provider: PROVIDER,
+              model: MODEL_ID,
+            });
+          }
           const recent = listJobs().slice(0, 1);
           const job = recent[0];
           if (job) {
@@ -651,7 +684,32 @@ Bun.serve({
               { ...routerMeta, kind: "error", stage: "long_job", error: "unknown jobType" },
             );
           }
+          // Pre-flight slot check. Look at recent conversation + active
+          // prompt so a "yes, go" follow-up after we asked for the folder
+          // doesn't get rejected.
+          const conversationText = `${prompt}\n${recentTurnsForRouter(messages)}`;
+          const slots = extractGenericSlots(conversationText);
+          if (jobType === "github_issues_to_sheet" && (!slots.owner || !slots.repo)) {
+            upsertTask(USER_ID, { intent: jobType, status: "collecting_input", slots });
+            return dataStreamReply(
+              "Which GitHub repo should I read? Tell me the owner and repo in the form `owner/repo` (e.g. `composiohq/composio`).",
+              { ...routerMeta, kind: "clarify", reason: "missing_repo" },
+            );
+          }
+          if (jobType === "drive_files_to_sheet" && !slots.folder_id) {
+            upsertTask(USER_ID, { intent: jobType, status: "collecting_input", slots });
+            return dataStreamReply(
+              "Paste the Google Drive folder URL (something like `https://drive.google.com/drive/folders/<id>`) and I'll start the job.",
+              { ...routerMeta, kind: "clarify", reason: "missing_folder" },
+            );
+          }
           const job = createJob(jobType, prompt);
+          upsertTask(USER_ID, {
+            intent: jobType,
+            status: "running",
+            slots,
+            jobId: job.id,
+          });
           // fire-and-forget worker — runs in the same Bun process; the
           // client polls /api/jobs/:id to render progress.
           (async () => {
@@ -811,6 +869,14 @@ Rules:
           const calMeta = { ...routerMeta, intent: "calendar_schedule" };
 
           if (outcome.status === "clarify") {
+            upsertTask(USER_ID, {
+              intent: "calendar_schedule",
+              status: "collecting_input",
+              slots: {
+                start_time: outcome.slots.start?.toISOString(),
+                attendee: outcome.slots.attendeesEmails[0],
+              },
+            });
             console.log(
               `[calendar] clarify (${outcome.reason}): ${outcome.message.slice(0, 120)}`,
             );
@@ -821,6 +887,11 @@ Rules:
             });
           }
           if (outcome.status === "error") {
+            upsertTask(USER_ID, {
+              intent: "calendar_schedule",
+              status: "failed",
+              error: outcome.message,
+            });
             console.log(`[calendar] error: ${outcome.message.slice(0, 200)}`);
             return dataStreamReply(outcome.message, {
               ...calMeta,
@@ -829,6 +900,15 @@ Rules:
             });
           }
           // success — answer is built from the verified tool result only
+          upsertTask(USER_ID, {
+            intent: "calendar_schedule",
+            status: "succeeded",
+            slots: { start: outcome.start.toISOString(), attendees: outcome.attendees },
+            result: {
+              summary: `Scheduled ${outcome.slots.title}`,
+              eventLink: outcome.eventLink ?? undefined,
+            },
+          });
           const reply = formatEventSuccess(outcome, tz);
           // workflow timeline: resolve-contact step (skipped if email given) +
           // create-event step. Both already completed before this branch runs.
@@ -1012,6 +1092,9 @@ Operating rules:
 - Look at the FULL conversation history when answering follow-up messages. A bare email address, a date, or "just say hi" is a continuation of the prior task, not a new task. BUT an explicit verb in the active prompt ("schedule…", "send…", "delete…", "read…") OVERRIDES prior context and starts a new task — don't carry stale recipient/attachment state into an unrelated request.
 - ANTI-HALLUCINATION (mutating actions): for any CREATE/UPDATE/DELETE/SEND/ADD/REMOVE/MODIFY/INSERT/PATCH action your final answer MUST be grounded in the actual tool result. If the tool was not called, OR returned successful=false, OR returned an error, OR you did not receive a result — DO NOT claim the action happened. Do NOT invent times, IDs, links, or confirmations. If you're unsure, say "I haven't done it yet — I need <X>."
 - For calendar/event creation specifically: never claim "scheduled for tomorrow at 3 PM" (or any time) unless you actually called CREATE_EVENT with those values AND the tool returned success. The user said "in 5 mins" means now + 5 minutes, not "tomorrow at some random time".
+- BANNED PHRASES — do NOT use these unless they correspond to a real workflow event you just observed: "please hold on", "please wait", "let me proceed", "I will now", "creating now", "scheduling now", "sending now", "fetching now", "one moment". Either DO the action (call a tool) or ASK for the missing input. Never narrate fake progress.
+- "this", "send this", "use this", "the attached file/PDF" — when the user uses these words and there is an uploaded file listed in the attachment block above, "this" REFERS to that file. Use it. Do NOT ask the user to upload again. If the mime type doesn't match what they said ("PDF" but the file is an image), ASK ONCE: "I see a <mime> attached, not a PDF — should I send this file anyway?" — if they reply "yes" / "this" / "go ahead", send it as-is.
+- If you find yourself about to ask the user for an S3 key, file path, MIME type, file size, internal ID, or any technical detail — STOP. The platform already has that information in the attachment/system context above. Use it.
 - Be concise. A few sentences plus a compact list when relevant.${intentBlock}${attachmentBlock}`;
 
         const result = streamText({
