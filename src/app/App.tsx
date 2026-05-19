@@ -22,6 +22,17 @@ export default function App() {
   const attachmentsRef = useRef<UploadInfo[]>([]);
   attachmentsRef.current = attachments;
 
+  // Bulletproof clear: any source can call this, idempotent, logs once
+  function clearAttachments(reason: string) {
+    if (attachmentsRef.current.length === 0) return; // already empty
+    console.log(
+      `%c[attachments] clearing (reason=${reason}) count=${attachmentsRef.current.length} → 0`,
+      "color:#a40",
+    );
+    attachmentsRef.current = [];
+    setAttachments([]);
+  }
+
   const [errors, setErrors] = useState<AppError[]>([]);
   const pushError = (e: Omit<AppError, "id">) =>
     setErrors((cur) => [...cur, { id: uid(), ...e }]);
@@ -99,7 +110,9 @@ export default function App() {
         console.log("%c[job-ui] started", "color:#0a7;font-weight:600", part);
       } else if (kind === "action_success") {
         console.log("%c[chat:action_success]", "color:#0a7;font-weight:600", part);
-        if (part.clearAttachments) setAttachments([]);
+        if (part.action === "send_email" || part.clearAttachments) {
+          clearAttachments("action_success event");
+        }
       } else if (kind === "finish") {
         console.log("%c[chat:finish]", "color:#888", part);
       } else {
@@ -267,7 +280,11 @@ export default function App() {
     // success (see the effect below) or when the user clicks the X.
   }
 
-  // Auto-clear attachments once an email actually goes out successfully.
+  // Fallback path: scan the latest assistant message for a SEND_EMAIL tool
+  // invocation whose result is genuinely successful. Independent from the
+  // action_success SSE event so we still clear if the event is dropped.
+  // Critical: Composio responses have `error` as a real key with value
+  // `null` on success — we must check `r.error != null`, not "error" in r.
   useEffect(() => {
     if (messages.length === 0 || attachments.length === 0) return;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -278,10 +295,14 @@ export default function App() {
         if (!/SEND_EMAIL/i.test(ti.toolName ?? "")) return false;
         if (ti.state !== "result") return false;
         const r = ti.result;
-        return !!r && !(typeof r === "object" && "error" in r);
+        if (!r || typeof r !== "object") return true; // result present but opaque → assume success
+        // Composio shape: { successful, error, data }. error: null on success.
+        const errVal = (r as any).error ?? (r as any).message;
+        const reportedFailed = (r as any).successful === false;
+        return !reportedFailed && (errVal == null || errVal === "");
       });
       if (sent) {
-        setAttachments([]);
+        clearAttachments("toolInvocations.send_email success");
         return;
       }
       break; // only inspect the latest assistant turn
