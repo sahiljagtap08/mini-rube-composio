@@ -27,7 +27,7 @@ import {
 } from "./lib/handlers/calendarSchedule";
 import { runGithubIssuesToSheet } from "./lib/handlers/githubIssuesToSheet";
 import { runDriveFilesToSheet } from "./lib/handlers/driveFilesToSheet";
-import { createJob, getJob, snapshot, subscribe } from "./lib/jobs";
+import { createJob, getJob, listJobs, snapshot, subscribe } from "./lib/jobs";
 
 const USER_ID = "candidate";
 
@@ -180,6 +180,20 @@ async function getConnectedToolkits(userId: string): Promise<Set<string>> {
     console.warn("[connections] list failed:", err?.message ?? err);
     return new Set();
   }
+}
+
+function formatJobProgress(event: any): string {
+  if (event.kind === "workflow_progress") {
+    const total = event.total ? `/${event.total}` : "";
+    const label = event.label ? ` — ${event.label}` : "";
+    return `Currently: ${event.current}${total}${label}.`;
+  }
+  if (event.kind === "progress") {
+    const total = event.total ? `/${event.total}` : "";
+    const label = event.message ? ` — ${event.message}` : "";
+    return `Currently: ${event.processed}${total}${label}.`;
+  }
+  return "";
 }
 
 function lastUserText(messages: CoreMessage[]): string {
@@ -525,6 +539,52 @@ Bun.serve({
         const connected = await getConnectedToolkits(USER_ID);
         console.log(`[chat] connected=${[...connected].join(",") || "(none)"}`);
 
+        // --- deterministic status follow-up ---
+        // If the user is asking about the status of a recent long job
+        // ("is it done?", "what's the status?", "did it finish?") and we
+        // have an active or recently-completed job in the store, answer
+        // from the job state directly. Don't route to the LLM.
+        const STATUS_RX =
+          /^(?:is it (?:done|finished|ready)\??|are we done\??|did it (?:finish|complete)\??|what(?:'s| is) the (?:status|progress)\??|status\??|how(?:'s| is) it going\??|progress\??|done\??|finished\??)$/i;
+        if (STATUS_RX.test(prompt.trim())) {
+          const recent = listJobs().slice(0, 1);
+          const job = recent[0];
+          if (job) {
+            let msg: string;
+            if (job.status === "running") {
+              // find latest progress event
+              const lastProgress = [...job.log]
+                .reverse()
+                .find(
+                  (e) =>
+                    e.event.kind === "workflow_progress" ||
+                    e.event.kind === "progress",
+                );
+              const detail = lastProgress
+                ? formatJobProgress(lastProgress.event as any)
+                : "Still running.";
+              msg = `Still running. ${detail}`;
+            } else if (job.status === "succeeded") {
+              const r = (job.result ?? {}) as any;
+              const summary = r.summary ?? "Job complete.";
+              const link = r.sheetUrl ? `\n\nOpen Sheet: ${r.sheetUrl}` : "";
+              msg = `Done. ${summary}${link}`;
+            } else if (job.status === "failed") {
+              msg = `It failed: ${job.error ?? "unknown error"}`;
+            } else {
+              msg = `Job is ${job.status}.`;
+            }
+            console.log(`[chat] status follow-up answered from job ${job.id} (${job.status})`);
+            return dataStreamReply(msg, {
+              kind: "status_followup",
+              jobId: job.id,
+              jobStatus: job.status,
+              provider: PROVIDER,
+              model: MODEL_ID,
+            });
+          }
+        }
+
         let decision: RouteDecision;
         try {
           decision = await route(prompt, connected, {
@@ -620,10 +680,21 @@ Bun.serve({
         // the generic tool loop entirely: fetch lean, sanitize + rank in code,
         // feed the model only the compact top-N for natural-language wording.
         if (decision.intent === "email_triage") {
-          const triage = await runEmailTriage(prompt, USER_ID);
-          const today = new Date().toISOString().slice(0, 10);
+          // emit workflow steps so the UI shows: Fetch emails → Rank → answer
           const sd = new StreamData();
           sd.append({ ...routerMeta, intent: "email_triage" } as any);
+          sd.append({
+            kind: "workflow_started",
+            title: "Reading your inbox",
+            steps: [
+              { id: "fetch", label: "Fetch emails", service: "gmail", status: "active", toolSlug: "GOOGLESUPER_FETCH_EMAILS" },
+              { id: "rank", label: "Rank important emails", service: "rank", status: "pending" },
+              { id: "summarize", label: "Write summary", service: "model", status: "pending" },
+            ],
+          } as any);
+
+          const triage = await runEmailTriage(prompt, USER_ID);
+          const today = new Date().toISOString().slice(0, 10);
           sd.append({
             kind: "triage",
             ...triage.stats,
@@ -631,11 +702,30 @@ Bun.serve({
           } as any);
 
           if (triage.error) {
+            sd.append({ kind: "workflow_step", stepId: "fetch", status: "error", detail: triage.error } as any);
+            sd.append({ kind: "workflow_error", message: triage.error } as any);
             return dataStreamReply(
               `I tried to fetch your emails but the Gmail tool failed: ${triage.error}\n\nTry reconnecting Google or check the server logs.`,
               { ...routerMeta, kind: "error", stage: "fetch_emails", error: triage.error },
             );
           }
+          sd.append({
+            kind: "workflow_step",
+            stepId: "fetch",
+            status: "done",
+            detail: `${triage.stats.fetched} fetched`,
+          } as any);
+          sd.append({
+            kind: "workflow_step",
+            stepId: "rank",
+            status: "done",
+            detail: `Top ${triage.stats.topCount}`,
+          } as any);
+          sd.append({
+            kind: "workflow_step",
+            stepId: "summarize",
+            status: "active",
+          } as any);
 
           const triagePayload = JSON.stringify(triage.topEmails, null, 2);
           const intro =
@@ -676,12 +766,27 @@ Rules:
               console.log(
                 `[chat] finish reason=${finishReason} usage=${JSON.stringify(usage)}`,
               );
+              sd.append({
+                kind: "workflow_step",
+                stepId: "summarize",
+                status: "done",
+              } as any);
+              sd.append({
+                kind: "workflow_done",
+                result: {
+                  fetched: triage.stats.fetched,
+                  topCount: triage.stats.topCount,
+                  summary: `Surfaced ${triage.stats.topCount} important emails out of ${triage.stats.fetched}.`,
+                },
+              } as any);
               sd.append({ kind: "finish", finishReason, usage } as any);
               sd.close();
             },
             onError({ error }) {
               const msg = (error as any)?.message ?? String(error);
               console.error("[streamText:error]", msg);
+              sd.append({ kind: "workflow_step", stepId: "summarize", status: "error", detail: msg } as any);
+              sd.append({ kind: "workflow_error", message: msg } as any);
               sd.append({ kind: "error", stage: "streamText", error: msg } as any);
             },
           });
@@ -725,9 +830,25 @@ Rules:
           }
           // success — answer is built from the verified tool result only
           const reply = formatEventSuccess(outcome, tz);
+          // workflow timeline: resolve-contact step (skipped if email given) +
+          // create-event step. Both already completed before this branch runs.
+          const needsContactStep = outcome.slots.attendeeNames.length > 0;
+          const workflowSteps = [
+            ...(needsContactStep
+              ? [{ id: "resolve", label: "Search contacts", service: "contacts", status: "done", toolSlug: "GOOGLESUPER_SEARCH_PEOPLE" }]
+              : []),
+            { id: "create_event", label: "Create calendar event", service: "calendar", status: "done", toolSlug: "GOOGLESUPER_CREATE_EVENT" },
+          ];
           const enc = new TextEncoder();
           const parts: string[] = [
             `2:${JSON.stringify([calMeta])}\n`,
+            `2:${JSON.stringify([
+              {
+                kind: "workflow_started",
+                title: "Scheduling calendar event",
+                steps: workflowSteps,
+              },
+            ])}\n`,
             `2:${JSON.stringify([
               {
                 kind: "action_success",
@@ -738,6 +859,16 @@ Rules:
                 attendees: outcome.attendees,
                 eventLink: outcome.eventLink ?? null,
                 meetLink: outcome.meetLink ?? null,
+              },
+            ])}\n`,
+            `2:${JSON.stringify([
+              {
+                kind: "workflow_done",
+                result: {
+                  eventLink: outcome.eventLink ?? undefined,
+                  meetLink: outcome.meetLink ?? undefined,
+                  summary: `Scheduled ${outcome.slots.title} for ${outcome.start.toISOString()}`,
+                },
               },
             ])}\n`,
             `0:${JSON.stringify(reply)}\n`,

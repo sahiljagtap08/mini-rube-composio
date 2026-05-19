@@ -7,6 +7,7 @@ type Props = {
   messages: ChatMessage[];
   metaByAssistantIndex: Map<number, RouteMeta>;
   triageByAssistantIndex: Map<number, TriageStats>;
+  workflowByAssistantIndex: Map<number, any[]>;
   isStreaming: boolean;
 };
 
@@ -14,6 +15,7 @@ export function MessageList({
   messages,
   metaByAssistantIndex,
   triageByAssistantIndex,
+  workflowByAssistantIndex,
   isStreaming,
 }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -28,11 +30,13 @@ export function MessageList({
       {messages.map((m) => {
         let meta: RouteMeta | undefined;
         let triage: TriageStats | undefined;
+        let workflowEvents: any[] | undefined;
         let streaming = false;
         if (m.role === "assistant") {
           assistantIdx += 1;
           meta = metaByAssistantIndex.get(assistantIdx);
           triage = triageByAssistantIndex.get(assistantIdx);
+          workflowEvents = workflowByAssistantIndex.get(assistantIdx);
           const isLast = m === messages[messages.length - 1];
           streaming = isStreaming && isLast;
         }
@@ -42,6 +46,7 @@ export function MessageList({
             message={m}
             meta={meta}
             triage={triage}
+            workflowEvents={workflowEvents}
             isStreaming={streaming}
           />
         );

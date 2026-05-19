@@ -5,6 +5,7 @@ import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorStack, type AppError } from "./components/ErrorCard";
+import { ActiveJobBanner } from "./components/ActiveJobBanner";
 import type { Toolkit } from "./components/ConnectionChips";
 import type { RouteMeta, TriageStats } from "./types";
 import type { Attachment } from "./components/AttachmentChips";
@@ -93,6 +94,9 @@ export default function App() {
   const [triageByAssistantIndex, setTriageByIdx] = useState<
     Map<number, TriageStats>
   >(new Map());
+  const [workflowEventsByAssistantIndex, setWorkflowByIdx] = useState<
+    Map<number, any[]>
+  >(new Map());
 
   useEffect(() => {
     if (!data) return;
@@ -131,21 +135,29 @@ export default function App() {
     // long-job replies use job_started as their primary meta event.
     const routeMap = new Map<number, RouteMeta>();
     const triageMap = new Map<number, TriageStats>();
+    const workflowMap = new Map<number, any[]>();
     let nextIdx = 0;
     let currentIdx = -1;
     for (const part of data as any[]) {
       if (part?.kind === "route" || part?.kind === "job_started") {
         currentIdx = nextIdx;
-        // Merge job-specific fields (jobId, jobType) into the RouteMeta so
-        // Message can find them.
         routeMap.set(currentIdx, part as RouteMeta);
         nextIdx += 1;
       } else if (part?.kind === "triage" && currentIdx >= 0) {
         triageMap.set(currentIdx, part as TriageStats);
+      } else if (
+        currentIdx >= 0 &&
+        typeof part?.kind === "string" &&
+        part.kind.startsWith("workflow_")
+      ) {
+        const list = workflowMap.get(currentIdx) ?? [];
+        list.push(part);
+        workflowMap.set(currentIdx, list);
       }
     }
     setMetaByIdx(routeMap);
     setTriageByIdx(triageMap);
+    setWorkflowByIdx(workflowMap);
   }, [data]);
 
   // Connection state
@@ -337,6 +349,30 @@ export default function App() {
 
   const metaMap = useMemo(() => metaByAssistantIndex, [metaByAssistantIndex]);
   const triageMap = useMemo(() => triageByAssistantIndex, [triageByAssistantIndex]);
+  const workflowMap = useMemo(() => workflowEventsByAssistantIndex, [workflowEventsByAssistantIndex]);
+
+  // Latest job mention across all assistant messages — used for an active
+  // workflow banner above the composer.
+  const latestJob = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role !== "assistant") continue;
+      const meta = metaMap.get(
+        [...metaMap.keys()].filter((k) => k <= 999).pop() ?? -1,
+      );
+      const id = (meta as any)?.jobId as string | undefined;
+      const type = (meta as any)?.jobType as string | undefined;
+      if (id) return { id, type };
+      break;
+    }
+    // walk metaMap entries from highest index for a fallback
+    for (const [, meta] of [...metaMap.entries()].sort((a, b) => b[0] - a[0])) {
+      const id = (meta as any)?.jobId as string | undefined;
+      const type = (meta as any)?.jobType as string | undefined;
+      if (id) return { id, type };
+    }
+    return null;
+  }, [messages, metaMap]);
 
   return (
     <div className="app">
@@ -354,12 +390,16 @@ export default function App() {
               messages={messages}
               metaByAssistantIndex={metaMap}
               triageByAssistantIndex={triageMap}
+              workflowByAssistantIndex={workflowMap}
               isStreaming={isLoading}
             />
           ) : (
             <EmptyState onPick={onPickSuggestion} />
           )}
         </div>
+        {latestJob?.id && (
+          <ActiveJobBanner jobId={latestJob.id} jobType={latestJob.type} />
+        )}
         <Composer
           value={input}
           onChange={handleInputChange}
