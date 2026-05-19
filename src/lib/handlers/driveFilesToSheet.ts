@@ -122,27 +122,38 @@ export async function runDriveFilesToSheet(
   try {
     const folderId = parseFolderId(prompt);
     if (!folderId) {
-      emit(job, {
-        kind: "error",
-        error: "I couldn't find a Drive folder ID in your prompt. Paste the folder URL (https://drive.google.com/drive/folders/<id>).",
-      });
+      workflowError(
+        job,
+        "I couldn't find a Drive folder ID in your prompt. Paste the folder URL (https://drive.google.com/drive/folders/<id>).",
+      );
       return;
     }
-    // LIST_CHILDREN_V2 only returns id-only references — we need full
-    // metadata (name, mimeType) so we use FIND_FILE with a folder_id filter.
-    const chain = [
-      "GOOGLESUPER_FIND_FILE",
-      "GOOGLESUPER_DOWNLOAD_FILE",
-      "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
-      "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
-    ];
-    emit(job, { kind: "plan", chain, note: `folder ${folderId}` });
-    console.log(`[drive→sheet] plan: ${describeChain(chain)} folder=${folderId}`);
+    const STEPS = {
+      LIST: "list_folder",
+      EXTRACT: "extract_resumes",
+      CREATE_SHEET: "create_sheet",
+      WRITE_ROWS: "write_rows",
+    };
+    emit(job, {
+      kind: "workflow_started",
+      jobId: job.id,
+      title: `Reading Drive resumes → Google Sheet`,
+      steps: [
+        step(STEPS.LIST, "Read Drive folder", "drive", {
+          toolSlug: "GOOGLESUPER_FIND_FILE",
+        }),
+        step(STEPS.EXTRACT, "Extract resume fields", "model"),
+        step(STEPS.CREATE_SHEET, "Create Google Sheet", "sheets", {
+          toolSlug: "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
+        }),
+        step(STEPS.WRITE_ROWS, "Write candidate rows", "sheets", {
+          toolSlug: "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
+        }),
+      ],
+    });
 
     // ---- Phase 1: list files in folder ----
-    // FIND_FILE returns full metadata (name, mimeType, webViewLink). The
-    // alternative LIST_CHILDREN_V2 only returns id-only references.
-    emit(job, { kind: "step", label: `Listing files in Drive folder ${folderId}` });
+    workflowStep(job, STEPS.LIST, "active");
     let allFiles: any[] = [];
     let pageToken: string | undefined;
     let page = 0;
@@ -153,7 +164,8 @@ export async function runDriveFilesToSheet(
         pageToken,
       });
       if (res?.successful === false) {
-        emit(job, { kind: "error", error: `Drive list failed: ${res.error}` });
+        workflowStep(job, STEPS.LIST, "error", res.error);
+        workflowError(job, `Drive list failed: ${res.error}`);
         return;
       }
       const data = res?.data ?? res;
@@ -161,28 +173,22 @@ export async function runDriveFilesToSheet(
       if (!Array.isArray(files)) break;
       allFiles.push(...files);
       pageToken = data?.nextPageToken ?? data?.next_page_token;
-      emit(job, {
-        kind: "progress",
-        processed: allFiles.length,
-        total: null,
-        message: `${allFiles.length} files listed`,
-      });
+      workflowProgress(job, allFiles.length, undefined, `${allFiles.length} files listed`);
       if (!pageToken || files.length === 0) break;
       page += 1;
     }
     if (allFiles.length === 0) {
-      emit(job, {
-        kind: "done",
-        result: { filesCount: 0, note: "No files found in that folder." },
-      });
+      workflowStep(job, STEPS.LIST, "done", "0 files");
+      workflowStep(job, STEPS.EXTRACT, "skipped");
+      workflowStep(job, STEPS.CREATE_SHEET, "skipped");
+      workflowStep(job, STEPS.WRITE_ROWS, "skipped");
+      workflowDone(job, { summary: "No files found in that folder.", rowsWritten: 0 });
       return;
     }
-    emit(job, {
-      kind: "step",
-      label: `Found ${allFiles.length} file${allFiles.length === 1 ? "" : "s"}. Extracting in parallel (concurrency=${CONCURRENCY})…`,
-    });
+    workflowStep(job, STEPS.LIST, "done", `${allFiles.length} files`);
 
     // ---- Phase 2: download + extract per file ----
+    workflowStep(job, STEPS.EXTRACT, "active", `${allFiles.length} files (concurrency ${CONCURRENCY})`);
     let extracted = 0;
     const rows: (string | number)[][] = [HEADERS];
     type Outcome = { filename: string; fields: ExtractedFields; sourceUrl: string };
@@ -207,12 +213,7 @@ export async function runDriveFilesToSheet(
         ? await extractOne(text)
         : { name: "", university: "", last_job: "" };
       extracted += 1;
-      emit(job, {
-        kind: "progress",
-        processed: extracted,
-        total: allFiles.length,
-        message: filename,
-      });
+      workflowProgress(job, extracted, allFiles.length, filename);
       return { filename, fields, sourceUrl };
     });
     for (const o of outcomes) {
@@ -224,17 +225,19 @@ export async function runDriveFilesToSheet(
         o.sourceUrl,
       ]);
     }
+    workflowStep(job, STEPS.EXTRACT, "done", `${outcomes.length} resumes extracted`);
 
     // ---- Phase 3: create sheet ----
+    workflowStep(job, STEPS.CREATE_SHEET, "active");
     const sheetTitle = `mini-rube · Drive candidates · ${new Date().toISOString().slice(0, 10)}`;
-    emit(job, { kind: "step", label: `Creating Google Sheet "${sheetTitle}"` });
     const createRes: any = await executeTool(
       "GOOGLESUPER_CREATE_GOOGLE_SHEET1",
       userId,
       { title: sheetTitle },
     );
     if (createRes?.successful === false) {
-      emit(job, { kind: "error", error: `Couldn't create sheet: ${createRes.error}` });
+      workflowStep(job, STEPS.CREATE_SHEET, "error", createRes.error);
+      workflowError(job, `Couldn't create sheet: ${createRes.error}`);
       return;
     }
     const sheetData = createRes?.data ?? createRes ?? {};
@@ -251,13 +254,11 @@ export async function runDriveFilesToSheet(
         ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`
         : null);
     if (!spreadsheetId) {
-      emit(job, {
-        kind: "error",
-        error: "Sheet was created but no spreadsheet_id was returned.",
-      });
+      workflowStep(job, STEPS.CREATE_SHEET, "error", "no spreadsheet_id");
+      workflowError(job, "Sheet was created but no spreadsheet_id was returned.");
       return;
     }
-    emit(job, { kind: "step", label: "Sheet created", detail: spreadsheetId });
+    workflowStep(job, STEPS.CREATE_SHEET, "done", sheetTitle);
 
     // ---- Phase 4: append rows in batches ----
     let wroteTotal = 0;
